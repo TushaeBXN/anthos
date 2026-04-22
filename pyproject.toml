@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "anthos"
+version     = "0.1.0"
+description = "Anthos — Thought-Token Bifurcated Recurrent Transformer. Think in Streams."
+readme      = "README.md"
+license     = { text = "MIT" }
+authors     = [{ name = "Tushae Thomas" }]
+keywords    = ["deep-learning", "transformer", "language-model", "mixture-of-experts", "recurrent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies    = ["torch>=2.0"]
+
+[project.optional-dependencies]
+train  = ["datasets>=2.0", "transformers>=4.40"]
+dev    = ["pytest>=7.0", "pytest-cov"]
+
+[project.urls]
+Homepage   = "https://github.com/TushaeThomas/anthos"
+Repository = "https://github.com/TushaeThomas/anthos"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["anthos*"]
