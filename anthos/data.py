@@ -53,7 +53,6 @@ class PackedTextDataset(IterableDataset):
             self.subset,
             split=self.split,
             streaming=True,
-            trust_remote_code=True,
         )
 
         buffer: list[int] = []
