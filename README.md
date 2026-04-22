@@ -13,6 +13,25 @@
 
 ---
 
+## Project Status
+
+<div align="center">
+  <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
+  <p><em>Initial smoke test (v0.1.0) completed on April 22, 2026. Successfully validated tokenization, backpropagation, and checkpointing logic on local hardware.</em></p>
+</div>
+
+| | |
+|---|---|
+| **Date** | April 22, 2026 |
+| **Version** | v0.1.0 |
+| **Device** | MacBook Pro (CPU / float32) |
+| **Parameters** | 6,961,571 |
+| **Dataset** | roneneldan/TinyStories |
+| **Steps** | 2,000 |
+| **Final Loss** | 14.82 |
+
+---
+
 ## What is Anthos?
 
 Anthos is a **Thought-Token Bifurcated Recurrent Transformer** — a new architecture class that separates *reasoning state* from *content state* into two parallel streams running through a shared recurrent core.
