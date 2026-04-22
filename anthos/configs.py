@@ -68,14 +68,14 @@ def get_training_config(tier: str = "smoke"):
 
     if tier == "smoke":
         # ── MacBook / CPU — proves the architecture learns ─────────────────
-        # ~10 min, no GPU needed. Loss should drop from ~8.0 to ~4.0.
+        # ~45 min, no GPU needed. 16 loops + 10k steps on TinyStories.
         model_cfg = AnthosConfig(
             vocab_size        = 50257,   # GPT-2 tokenizer
             dim               = 128,
             n_heads           = 4,
             n_kv_heads        = 2,
             max_seq_len       = 256,
-            max_loop_iters    = 8,
+            max_loop_iters    = 16,
             prelude_layers    = 1,
             coda_layers       = 1,
             n_thought_tokens  = 8,
@@ -94,16 +94,16 @@ def get_training_config(tier: str = "smoke"):
             dataset       = "roneneldan/TinyStories",
             seq_len       = 256,
             batch_size    = 2,
-            max_steps     = 2_000,
-            warmup_steps  = 100,
+            max_steps     = 10_000,
+            warmup_steps  = 200,
             learning_rate = 3e-4,
             grad_accum    = 4,       # effective batch = 8
-            phase1_steps  = 500,
+            phase1_steps  = 1_000,
             phase1_loops  = 4,
-            phase2_loops  = 8,
+            phase2_loops  = 16,
             log_every     = 25,
-            save_every    = 500,
-            sample_every  = 500,
+            save_every    = 1_000,
+            sample_every  = 1_000,
             run_name      = "anthos-smoke",
         )
 
