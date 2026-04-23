@@ -8,6 +8,7 @@
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
   [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
   [![Architecture](https://img.shields.io/badge/Architecture-Bifurcated_Recurrent_Transformer-5B9BD5?style=for-the-badge)](docs/architecture.md)
+  [![Tests](https://img.shields.io/badge/Tests-18%2F18_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/test_anthos.py)
 
 </div>
 
@@ -17,18 +18,21 @@
 
 <div align="center">
   <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
-  <p><em>Initial smoke test (v0.1.0) completed on April 22, 2026. Successfully validated tokenization, backpropagation, and checkpointing logic on local hardware.</em></p>
+  <p><em>Full smoke run (v0.1.0) completed on April 23, 2026. Successfully validated tokenization, backpropagation, checkpointing, and all 18 architecture tests on local hardware.</em></p>
 </div>
 
 | | |
 |---|---|
-| **Date** | April 22, 2026 |
+| **Date** | April 23, 2026 |
 | **Version** | v0.1.0 |
 | **Device** | MacBook Pro (CPU / float32) |
-| **Parameters** | 6,961,571 |
+| **Parameters** | 6,961,603 |
 | **Dataset** | roneneldan/TinyStories |
-| **Steps** | 2,000 |
-| **Final Loss** | 14.82 |
+| **Steps** | 10,000 |
+| **Max Loops** | 16 |
+| **Starting Loss** | 43.27 |
+| **Final Loss** | 10.99 |
+| **Tests** | 18 / 18 passed ✅ |
 
 ---
 
