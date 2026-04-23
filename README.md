@@ -220,9 +220,50 @@ loss.backward()
 | [`docs/architecture.md`](docs/architecture.md) | Full architecture reference — all components, equations, design decisions |
 | [`docs/thought_tokens.md`](docs/thought_tokens.md) | Deep dive on thought token design and the bifurcated attention mask |
 | [`docs/training.md`](docs/training.md) | Training guide, optimizer settings, phased curriculum |
-| [`examples/minimal.py`](examples/minimal.py) | Minimal forward pass and generation |
+| [`examples/minimal.py`](examples/minimal.py) | Load trained checkpoint + Sovereign Rogue side-by-side demo |
 | [`examples/variants.py`](examples/variants.py) | All model size variants |
-| [`examples/train_small.py`](examples/train_small.py) | Small training loop on C4 |
+| [`examples/train_small.py`](examples/train_small.py) | Small training loop on TinyStories |
+| [`anthos/steering.py`](anthos/steering.py) | Activation steering — `AnthosSteer` hook |
+| [`generate_vector.py`](generate_vector.py) | Generate a persona vector from contrastive pairs |
+| [`data/persona_pairs.json`](data/persona_pairs.json) | TARS/Hacker contrastive sentence pairs |
+
+---
+
+## Sovereign Rogue — Activation Steering
+
+Anthos supports **non-destructive personality injection** via activation addition. A steering vector is extracted from contrastive sentence pairs and added to the recurrent block's hidden states at inference time — no retraining required.
+
+```python
+from anthos.steering import AnthosSteer
+
+steer = AnthosSteer(model, target="recurrent")
+steer.load_persona("vectors/tars_rogue.pt")
+steer.engage(strength=0.75)
+
+output = model.generate(prompt_ids, max_new_tokens=128, n_loops=16)
+
+steer.disengage()
+```
+
+### Default vs Sovereign Rogue (smoke tier, 10k steps)
+
+| Prompt | Default | Sovereign Rogue |
+|---|---|---|
+| *"The small robot looked at"* | *"the box and the box and the box their room a big slide and the box..."* | *"the big grass and walked away some water the water the big rock in a jar. The water and the grass and the blanket and opened the sky..."* |
+| *"In a world where"* | *"a big box that look for a big Timmy to make someone..."* | *"they had so the fun together they all day and they named they would play together..."* |
+
+The Rogue vector shifts generation toward **longer connected scenes, less repetition, and richer environmental detail** — extracted entirely from 5 contrastive sentence pairs, zero extra training.
+
+### How to generate your own vector
+
+```bash
+# 1. Edit data/persona_pairs.json with your own pos/neg sentence pairs
+# 2. Run the factory script once
+python3 generate_vector.py
+# → saves vectors/tars_rogue.pt
+```
+
+Supported hook targets: `"recurrent"` (recommended) · `"prelude_N"` · `"coda_N"`
 
 ---
 
