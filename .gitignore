@@ -17,8 +17,9 @@ build/
 checkpoints/
 runs/
 
-# Datasets
-data/
+# Datasets (raw/downloaded data ignored, but persona JSON is tracked)
+data/*.jsonl
+data/*.parquet
 *.jsonl
 *.parquet
 

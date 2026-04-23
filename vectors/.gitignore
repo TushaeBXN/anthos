@@ -1,0 +1,4 @@
+# Ignore binary tensor files — generate locally with generate_vector.py
+*.pt
+*.pth
+*.bin
