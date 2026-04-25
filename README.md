@@ -39,6 +39,53 @@
 
 ---
 
+## Roadmap — What Needs to Happen Next
+
+### Stage 2 — `proof` tier (GPU required, ~$5)
+
+**What changes:**
+- Model capacity: `dim` 128 → 512 (16× more capacity per token)
+- Hardware: A100 or 4090 — [RunPod](https://runpod.io) or [Lambda Labs](https://lambdalabs.com)
+- Fresh run — architecture is larger, cannot resume from ethnic checkpoint
+
+**Nothing to code — already built:**
+```bash
+python3 train.py --tier proof
+```
+
+Expected outcome: loss ~2.5–3.0, coherent readable stories, ~3 hrs on a single GPU.
+
+---
+
+### Stage 3 — `instruct` tier (GPU required, ~$2)
+
+**What changes:**
+- Dataset switches from stories → [Alpaca](https://huggingface.co/datasets/tatsu-lab/alpaca) 52k instruction pairs
+- Loss is masked on prompt tokens so the model learns to *respond*, not memorise prompts
+- Must resume from a `proof` checkpoint — not smoke or ethnic
+
+**Already built:**
+```bash
+python3 train.py --tier instruct --resume checkpoints/anthos-proof/final.pt
+```
+
+Then talk to it:
+```bash
+python3 examples/chat.py --checkpoint checkpoints/anthos-instruct/final.pt
+```
+
+Expected outcome: Anthos follows instructions and answers questions in its own voice.
+
+---
+
+### What's ready right now (no GPU needed)
+- ✅ Run the test suite: `python3 -m pytest tests/test_anthos.py -v`
+- ✅ Generate with steering: `python3 examples/minimal.py`
+- ✅ Add custom persona pairs to `data/persona_pairs.json` + re-run `python3 generate_vector.py`
+- ✅ Chat against the ethnic checkpoint: `python3 examples/chat.py --checkpoint checkpoints/anthos-ethnic/final.pt --tier ethnic`
+
+---
+
 ## What is Anthos?
 
 Anthos is a **Thought-Token Bifurcated Recurrent Transformer** — a new architecture class that separates *reasoning state* from *content state* into two parallel streams running through a shared recurrent core.
