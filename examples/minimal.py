@@ -36,7 +36,7 @@ def generate(prompt: str, n_loops: int = 16, max_new: int = 80) -> str:
     ids = torch.tensor(tokenizer.encode(prompt), dtype=torch.long).unsqueeze(0)
     with torch.no_grad():
         out = model.generate(ids, max_new_tokens=max_new, n_loops=n_loops,
-                             temperature=0.8, top_k=40)
+                             temperature=0.3, top_k=40)
     return tokenizer.decode(out[0].tolist())
 
 # ── Default generation ────────────────────────────────────────────────────────

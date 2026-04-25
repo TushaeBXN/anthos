@@ -60,7 +60,7 @@ def generate_samples(model: Anthos, device: str, n_loops: int, n_samples: int = 
     samples = []
     for prompt in prompts:
         ids = torch.tensor(tok.encode(prompt), dtype=torch.long, device=device).unsqueeze(0)
-        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.6, top_k=40)
+        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.3, top_k=40)
         samples.append(tok.decode(out[0].tolist()))
     model.train()
     return samples

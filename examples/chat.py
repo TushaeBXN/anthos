@@ -30,7 +30,7 @@ parser.add_argument("--tier",       type=str,   default="sft",
                     choices=["smoke", "ethnic", "proof", "instruct", "sft"])
 parser.add_argument("--loops",      type=int,   default=16)
 parser.add_argument("--max-tokens", type=int,   default=200)
-parser.add_argument("--temp",       type=float, default=0.7)
+parser.add_argument("--temp",       type=float, default=0.3)
 parser.add_argument("--tokenizer",  type=str,   default="data/anthos_tokenizer")
 args = parser.parse_args()
 
