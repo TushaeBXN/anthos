@@ -277,9 +277,55 @@ def get_training_config(tier: str = "smoke"):
             run_name      = "anthos-instruct",
         )
 
+    elif tier == "sft":
+        # ── Single GPU — SlimOrca chat SFT with Anthos special tokens ──────────
+        # Resume from a proof-tier checkpoint.
+        # Run setup_tokenizer.py first to create data/anthos_tokenizer/.
+        #
+        # python3 setup_tokenizer.py
+        # python3 train.py --tier sft --resume checkpoints/mansa_sovereign/step_002000.pt
+        model_cfg = AnthosConfig(
+            vocab_size        = 50262,   # GPT-2 50257 + 5 special tokens
+            dim               = 512,
+            n_heads           = 8,
+            n_kv_heads        = 4,
+            max_seq_len       = 512,
+            max_loop_iters    = 16,
+            prelude_layers    = 2,
+            coda_layers       = 2,
+            n_thought_tokens  = 16,
+            attn_type         = "gqa",
+            n_experts         = 16,
+            n_shared_experts  = 2,
+            n_experts_per_tok = 4,
+            expert_dim        = 256,
+            lora_rank         = 8,
+            moe_aux_coef      = 1e-2,
+            act_aux_coef      = 1e-3,
+        )
+        train_cfg = TrainingConfig(
+            device        = "cuda",
+            dtype         = auto_dtype,
+            dataset       = "Open-Orca/SlimOrca",
+            seq_len       = 512,
+            batch_size    = 8,
+            max_steps     = 3_000,        # ~1 pass through SlimOrca
+            warmup_steps  = 100,
+            learning_rate = 3e-5,         # very low LR — fine-tuning behavior
+            min_lr        = 3e-6,
+            grad_accum    = 4,
+            phase1_steps  = 0,
+            phase1_loops  = 16,
+            phase2_loops  = 16,
+            log_every     = 50,
+            save_every    = 500,
+            sample_every  = 500,
+            run_name      = "anthos-sft",
+        )
+
     else:
         raise ValueError(
-            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct"
+            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct | sft"
         )
 
     return model_cfg, train_cfg

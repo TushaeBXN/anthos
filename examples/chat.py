@@ -1,20 +1,23 @@
 """
-Anthos — Chat / Instruction inference
-──────────────────────────────────────
-Interactive prompt loop using a fine-tuned instruct checkpoint.
-Formats your input as an Alpaca instruction and generates a response.
+Anthos — Chat Interface
+────────────────────────
+Interactive conversation loop using Anthos special tokens.
+
+Two modes:
+  sft      — uses <|user|> / <|thought|> / <|assistant|> template (after SFT training)
+  legacy   — uses Alpaca prompt format (instruct/smoke/ethnic checkpoints)
 
 Usage:
-    # After training with --tier instruct:
-    python3 examples/chat.py --checkpoint checkpoints/anthos-instruct/final.pt
+    # SFT checkpoint (best):
+    python3 examples/chat.py --checkpoint checkpoints/anthos-sft/final.pt --tier sft
 
-    # Or try with the smoke checkpoint (responses will be rough — needs instruct training):
-    python3 examples/chat.py --checkpoint checkpoints/anthos-smoke/final.pt
+    # Ethnic checkpoint (rough but works today):
+    python3 examples/chat.py --checkpoint checkpoints/anthos-ethnic/final.pt --tier ethnic
 """
 
 import argparse
 import torch
-from transformers import AutoTokenizer
+from pathlib import Path
 
 from anthos import Anthos
 from anthos.configs import get_training_config
@@ -22,66 +25,76 @@ from anthos.configs import get_training_config
 # ── Args ──────────────────────────────────────────────────────────────────────
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--checkpoint", type=str, default="checkpoints/anthos-instruct/final.pt",
-                    help="Path to checkpoint file")
-parser.add_argument("--tier",       type=str, default="instruct",
-                    choices=["smoke", "ethnic", "proof", "instruct"],
-                    help="Config tier matching the checkpoint")
-parser.add_argument("--loops",      type=int, default=16,
-                    help="Number of recurrent loops at inference (more = deeper thinking)")
-parser.add_argument("--max-tokens", type=int, default=200,
-                    help="Max new tokens to generate per response")
-parser.add_argument("--temp",       type=float, default=0.7,
-                    help="Sampling temperature (lower = more focused)")
+parser.add_argument("--checkpoint", type=str,   default="checkpoints/anthos-sft/final.pt")
+parser.add_argument("--tier",       type=str,   default="sft",
+                    choices=["smoke", "ethnic", "proof", "instruct", "sft"])
+parser.add_argument("--loops",      type=int,   default=16)
+parser.add_argument("--max-tokens", type=int,   default=200)
+parser.add_argument("--temp",       type=float, default=0.7)
+parser.add_argument("--tokenizer",  type=str,   default="data/anthos_tokenizer")
 args = parser.parse_args()
+
+# ── Load tokenizer ────────────────────────────────────────────────────────────
+
+from transformers import AutoTokenizer
+
+sft_mode = (args.tier == "sft")
+tok_path = args.tokenizer if (sft_mode and Path(args.tokenizer).exists()) else "gpt2"
+
+print(f"\nLoading tokenizer from: {tok_path}")
+tok = AutoTokenizer.from_pretrained(tok_path)
+tok.model_max_length = 2048
 
 # ── Load model ────────────────────────────────────────────────────────────────
 
-print(f"\nLoading Anthos from {args.checkpoint}...")
+print(f"Loading Anthos from {args.checkpoint}...")
 ckpt      = torch.load(args.checkpoint, map_location="cpu")
 model_cfg, _ = get_training_config(args.tier)
 model     = Anthos(model_cfg)
 model.load_state_dict(ckpt["model"])
 model.eval()
 
-tokenizer = AutoTokenizer.from_pretrained("gpt2")
-tokenizer.model_max_length = 2048
-
 total = sum(p.numel() for p in model.parameters())
 print(f"Parameters : {total:,}")
+print(f"Mode       : {'SFT chat' if sft_mode else 'Legacy Alpaca'}")
 print(f"Loops      : {args.loops}")
-print(f"Tier       : {args.tier}")
 print("\nType your message. Ctrl+C to quit.\n")
 print("─" * 60)
 
-# ── Alpaca prompt template ────────────────────────────────────────────────────
+# ── Prompt builders ───────────────────────────────────────────────────────────
 
-SYSTEM = (
-    "Below is an instruction that describes a task. "
-    "Write a response that appropriately completes the request."
+SYSTEM_PROMPT = (
+    "You are Anthos. You think carefully before you speak. "
+    "You are helpful, honest, and direct."
 )
 
-def build_prompt(instruction: str, context: str = "") -> str:
-    if context.strip():
-        return (
-            f"{SYSTEM}\n\n"
-            f"### Instruction:\n{instruction.strip()}\n\n"
-            f"### Input:\n{context.strip()}\n\n"
-            f"### Response:\n"
-        )
+def build_sft_prompt(user_msg: str) -> str:
+    """Anthos native chat format with thought stream."""
     return (
-        f"{SYSTEM}\n\n"
-        f"### Instruction:\n{instruction.strip()}\n\n"
+        f"<|system|>\n{SYSTEM_PROMPT}<|end|>\n"
+        f"<|user|>\n{user_msg.strip()}<|end|>\n"
+        f"<|thought|>\n<|end|>\n"   # model fills the thought stream
+        f"<|assistant|>\n"
+    )
+
+def build_legacy_prompt(user_msg: str) -> str:
+    """Alpaca format for smoke/ethnic/instruct checkpoints."""
+    return (
+        "Below is an instruction that describes a task. "
+        "Write a response that appropriately completes the request.\n\n"
+        f"### Instruction:\n{user_msg.strip()}\n\n"
         f"### Response:\n"
     )
 
-# ── Chat loop ─────────────────────────────────────────────────────────────────
+STOP_TOKENS = ["<|user|>", "<|system|>", "### Instruction:", "\n\n\n"]
+
+# ── Generation ────────────────────────────────────────────────────────────────
 
 @torch.no_grad()
-def respond(instruction: str, context: str = "") -> str:
-    prompt = build_prompt(instruction, context)
-    ids    = torch.tensor(
-        tokenizer.encode(prompt, add_special_tokens=False),
+def respond(user_msg: str) -> str:
+    prompt  = build_sft_prompt(user_msg) if sft_mode else build_legacy_prompt(user_msg)
+    ids     = torch.tensor(
+        tok.encode(prompt, add_special_tokens=False),
         dtype=torch.long
     ).unsqueeze(0)
 
@@ -93,27 +106,24 @@ def respond(instruction: str, context: str = "") -> str:
         top_k          = 50,
     )
 
-    # Decode only the newly generated tokens
     new_tokens = out[0, ids.shape[1]:]
-    response   = tokenizer.decode(new_tokens.tolist(), skip_special_tokens=True)
+    response   = tok.decode(new_tokens.tolist(), skip_special_tokens=True)
 
-    # Stop at the next ### marker if the model keeps going
-    for stop in ["### Instruction:", "### Input:", "### Response:", "\n\n\n"]:
+    for stop in STOP_TOKENS:
         if stop in response:
             response = response[:response.index(stop)]
 
     return response.strip()
 
+# ── Chat loop ─────────────────────────────────────────────────────────────────
 
 try:
     while True:
         user_input = input("\nYou: ").strip()
         if not user_input:
             continue
-
-        print("\nAnthos: ", end="", flush=True)
-        reply = respond(user_input)
-        print(reply)
+        print("\nAnthos:", end=" ", flush=True)
+        print(respond(user_input))
         print("─" * 60)
 
 except KeyboardInterrupt:

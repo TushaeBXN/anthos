@@ -268,6 +268,167 @@ def get_instruct_dataloader(
     )
 
 
+class ChatInstructDataset(IterableDataset):
+    """
+    Streams Open-Orca/SlimOrca and formats conversations using Anthos
+    custom chat tokens:
+
+        <|system|>
+        {system_prompt}<|end|>
+        <|user|>
+        {question}<|end|>
+        <|thought|>
+        [thought stream — model reasons here before speaking]<|end|>
+        <|assistant|>
+        {response}<|end|>
+
+    Loss is masked on everything except the assistant response,
+    so the model only learns to generate answers — not mimic prompts.
+
+    The <|thought|> block is empty during SFT (the model learns to fill it
+    during RLHF). Even empty, it reserves space for the thought stream.
+
+    Args:
+        tokenizer_path : path to saved Anthos tokenizer (data/anthos_tokenizer)
+        seq_len        : context window
+        mask_prompt    : mask system+user+thought tokens from loss (recommended)
+        split          : dataset split
+    """
+
+    def __init__(
+        self,
+        tokenizer_path: str = "data/anthos_tokenizer",
+        seq_len:        int  = 512,
+        mask_prompt:    bool = True,
+        split:          str  = "train",
+    ):
+        super().__init__()
+        self.seq_len     = seq_len
+        self.mask_prompt = mask_prompt
+        self.split       = split
+
+        from transformers import AutoTokenizer
+        self.tok = AutoTokenizer.from_pretrained(tokenizer_path)
+        self.eos = self.tok.eos_token_id
+
+        # Special token IDs
+        self.SYS   = self.tok.convert_tokens_to_ids("<|system|>")
+        self.USR   = self.tok.convert_tokens_to_ids("<|user|>")
+        self.THT   = self.tok.convert_tokens_to_ids("<|thought|>")
+        self.AST   = self.tok.convert_tokens_to_ids("<|assistant|>")
+        self.END   = self.tok.convert_tokens_to_ids("<|end|>")
+
+    def _encode(self, text: str) -> list[int]:
+        return self.tok.encode(text, add_special_tokens=False)
+
+    def _format(self, system: str, question: str, response: str):
+        """
+        Build token ids and labels. Prompt tokens get label -100.
+        Returns (input_ids, labels) as lists.
+        """
+        # Build prompt section (masked)
+        prompt_ids = (
+            [self.SYS] + self._encode(system.strip())  + [self.END] +
+            [self.USR] + self._encode(question.strip()) + [self.END] +
+            [self.THT, self.END]   # empty thought block — model fills during RLHF
+        )
+
+        # Build response section (learned)
+        response_ids = (
+            [self.AST] + self._encode(response.strip()) + [self.END, self.eos]
+        )
+
+        input_ids = prompt_ids + response_ids
+        labels    = (
+            [-100] * len(prompt_ids) +
+            response_ids
+        )
+        return input_ids, labels
+
+    def __iter__(self) -> Iterator[torch.Tensor]:
+        from datasets import load_dataset
+
+        ds = load_dataset(
+            "Open-Orca/SlimOrca",
+            split     = self.split,
+            streaming = True,
+        )
+
+        target = self.seq_len + 1
+
+        for example in ds:
+            convs = example.get("conversations", [])
+            if len(convs) < 2:
+                continue
+
+            # Extract system / human / gpt turns
+            system   = next((c["value"] for c in convs if c["from"] == "system"),
+                            "You are Anthos, a helpful and honest assistant.")
+            question = next((c["value"] for c in convs if c["from"] == "human"), "")
+            response = next((c["value"] for c in convs if c["from"] == "gpt"),   "")
+
+            if not question or not response:
+                continue
+
+            input_ids, labels = self._format(system, question, response)
+
+            # Truncate
+            input_ids = input_ids[:target]
+            labels    = labels[:target]
+            if len(input_ids) < 4:
+                continue
+
+            yield (
+                torch.tensor(input_ids, dtype=torch.long),
+                torch.tensor(labels,    dtype=torch.long),
+            )
+
+    def __len__(self):
+        return 517_982   # SlimOrca size
+
+
+def get_chat_dataloader(
+    seq_len:        int,
+    batch_size:     int,
+    num_workers:    int  = 0,
+    tokenizer_path: str  = "data/anthos_tokenizer",
+    split:          str  = "train",
+) -> DataLoader:
+    """
+    Returns a DataLoader for SlimOrca chat SFT.
+    Batches are (input_ids, labels) with prompt tokens masked to -100.
+
+    Run setup_tokenizer.py once before using this loader.
+    """
+    ds = ChatInstructDataset(
+        tokenizer_path = tokenizer_path,
+        seq_len        = seq_len,
+        split          = split,
+    )
+
+    def collate(batch):
+        tokens_list = [b[0] for b in batch]
+        labels_list = [b[1] for b in batch]
+        max_len = max(t.size(0) for t in tokens_list)
+
+        padded_tokens = torch.zeros(len(batch), max_len, dtype=torch.long)
+        padded_labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
+
+        for i, (t, l) in enumerate(zip(tokens_list, labels_list)):
+            padded_tokens[i, :t.size(0)] = t
+            padded_labels[i, :l.size(0)] = l
+
+        return padded_tokens, padded_labels
+
+    return DataLoader(
+        ds,
+        batch_size  = batch_size,
+        num_workers = num_workers,
+        pin_memory  = False,
+        collate_fn  = collate,
+    )
+
+
 def get_dataloader(
     dataset_name: str,
     split:        str,
