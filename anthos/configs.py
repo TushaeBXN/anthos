@@ -231,7 +231,55 @@ def get_training_config(tier: str = "smoke"):
             run_name      = "anthos-ethnic",
         )
 
+    elif tier == "instruct":
+        # ── Single A100/4090 — instruction tuning on Alpaca ───────────────────
+        # Resume from a proof-tier checkpoint. Fine-tunes on 52k instruction
+        # pairs so the model follows prompts instead of just completing text.
+        # ~1-2 hrs on a single GPU. Run after proof tier converges.
+        #
+        # python3 train.py --tier instruct --resume checkpoints/anthos-proof/final.pt
+        model_cfg = AnthosConfig(
+            vocab_size        = 50257,
+            dim               = 512,
+            n_heads           = 8,
+            n_kv_heads        = 4,
+            max_seq_len       = 512,
+            max_loop_iters    = 16,
+            prelude_layers    = 2,
+            coda_layers       = 2,
+            n_thought_tokens  = 16,
+            attn_type         = "gqa",
+            n_experts         = 16,
+            n_shared_experts  = 2,
+            n_experts_per_tok = 4,
+            expert_dim        = 256,
+            lora_rank         = 8,
+            moe_aux_coef      = 1e-2,
+            act_aux_coef      = 1e-3,
+        )
+        train_cfg = TrainingConfig(
+            device        = "cuda",
+            dtype         = auto_dtype,
+            dataset       = "tatsu-lab/alpaca",   # 52k instruction pairs
+            seq_len       = 512,
+            batch_size    = 8,
+            max_steps     = 5_000,                # 1 epoch ≈ 52k/8 = 6500 steps
+            warmup_steps  = 100,
+            learning_rate = 5e-5,                 # low LR — fine-tuning, not pre-training
+            min_lr        = 5e-6,
+            grad_accum    = 4,                    # effective batch = 32
+            phase1_steps  = 0,                    # skip straight to phase-2
+            phase1_loops  = 16,
+            phase2_loops  = 16,
+            log_every     = 50,
+            save_every    = 500,
+            sample_every  = 500,
+            run_name      = "anthos-instruct",
+        )
+
     else:
-        raise ValueError(f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic")
+        raise ValueError(
+            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct"
+        )
 
     return model_cfg, train_cfg

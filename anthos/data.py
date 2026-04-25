@@ -121,6 +121,153 @@ class LocalPackedTextDataset(IterableDataset):
         return 10_000_000   # streaming sentinel
 
 
+class AlpacaInstructDataset(IterableDataset):
+    """
+    Streams tatsu-lab/alpaca (52k instruction pairs) and formats each example
+    into the standard Alpaca prompt template, then tokenizes and packs.
+
+    Template:
+        Below is an instruction that describes a task. Write a response that
+        appropriately completes the request.
+
+        ### Instruction:
+        {instruction}
+
+        ### Input:          ← omitted when empty
+        {input}
+
+        ### Response:
+        {output}<|endoftext|>
+
+    During training, loss is masked on the prompt tokens so the model only
+    learns to predict the response — not to memorise the instruction format.
+
+    Args:
+        seq_len        : context window length
+        mask_prompt    : if True, set prompt token labels to -100 (recommended)
+        split          : HuggingFace dataset split (default "train")
+    """
+
+    SYSTEM = (
+        "Below is an instruction that describes a task. "
+        "Write a response that appropriately completes the request."
+    )
+
+    def __init__(
+        self,
+        seq_len:     int,
+        mask_prompt: bool = True,
+        split:       str  = "train",
+    ):
+        super().__init__()
+        self.seq_len     = seq_len
+        self.mask_prompt = mask_prompt
+        self.split       = split
+
+        from transformers import AutoTokenizer
+        self.tok = AutoTokenizer.from_pretrained("gpt2")
+        self.eos = self.tok.eos_token_id
+
+    def _format(self, instruction: str, inp: str, output: str) -> tuple[str, str]:
+        """Returns (prompt_text, full_text) — prompt is the part to mask."""
+        if inp.strip():
+            prompt = (
+                f"{self.SYSTEM}\n\n"
+                f"### Instruction:\n{instruction.strip()}\n\n"
+                f"### Input:\n{inp.strip()}\n\n"
+                f"### Response:\n"
+            )
+        else:
+            prompt = (
+                f"{self.SYSTEM}\n\n"
+                f"### Instruction:\n{instruction.strip()}\n\n"
+                f"### Response:\n"
+            )
+        full = prompt + output.strip()
+        return prompt, full
+
+    def __iter__(self) -> Iterator[torch.Tensor]:
+        from datasets import load_dataset
+
+        ds = load_dataset("tatsu-lab/alpaca", split=self.split, streaming=True)
+        target = self.seq_len + 1
+
+        # Yield individual examples (no cross-document packing for instruct)
+        for example in ds:
+            instruction = example.get("instruction", "")
+            inp         = example.get("input", "")
+            output      = example.get("output", "")
+
+            if not instruction or not output:
+                continue
+
+            prompt, full = self._format(instruction, inp, output)
+
+            full_ids   = self.tok.encode(full,   add_special_tokens=False) + [self.eos]
+            prompt_ids = self.tok.encode(prompt, add_special_tokens=False)
+            prompt_len = len(prompt_ids)
+
+            # Truncate to seq_len+1
+            full_ids = full_ids[:target]
+            if len(full_ids) < 2:
+                continue
+
+            tokens = torch.tensor(full_ids, dtype=torch.long)
+
+            if self.mask_prompt:
+                # Labels: -100 for prompt tokens (masked), real ids for response
+                labels = tokens.clone()
+                labels[:prompt_len] = -100
+                # Yield (tokens, labels) tuple — train loop must handle this
+                yield tokens, labels
+            else:
+                yield tokens, tokens.clone()
+
+    def __len__(self):
+        return 52_000   # Alpaca has ~52k examples
+
+
+def get_instruct_dataloader(
+    seq_len:     int,
+    batch_size:  int,
+    num_workers: int  = 0,
+    mask_prompt: bool = True,
+    split:       str  = "train",
+) -> DataLoader:
+    """
+    Returns a DataLoader for Alpaca instruction tuning.
+    Batches are (input_ids, labels) pairs where prompt tokens are masked to -100.
+    """
+    ds = AlpacaInstructDataset(
+        seq_len     = seq_len,
+        mask_prompt = mask_prompt,
+        split       = split,
+    )
+
+    def collate(batch):
+        # Pad to longest in batch, labels pad with -100
+        tokens_list = [b[0] for b in batch]
+        labels_list = [b[1] for b in batch]
+        max_len = max(t.size(0) for t in tokens_list)
+
+        padded_tokens = torch.zeros(len(batch), max_len, dtype=torch.long)
+        padded_labels = torch.full((len(batch), max_len), -100, dtype=torch.long)
+
+        for i, (t, l) in enumerate(zip(tokens_list, labels_list)):
+            padded_tokens[i, :t.size(0)] = t
+            padded_labels[i, :l.size(0)] = l
+
+        return padded_tokens, padded_labels
+
+    return DataLoader(
+        ds,
+        batch_size  = batch_size,
+        num_workers = num_workers,
+        pin_memory  = False,
+        collate_fn  = collate,
+    )
+
+
 def get_dataloader(
     dataset_name: str,
     split:        str,

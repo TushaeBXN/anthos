@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
-from anthos.data    import get_dataloader
+from anthos.data    import get_dataloader, get_instruct_dataloader
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -166,15 +166,24 @@ def train(tier: str = "smoke", resume: str | None = None):
         start_step = load_checkpoint(resume, model, optimizer, device)
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    subset = "sample-10BT" if "fineweb" in train_cfg.dataset.lower() else None
-    loader = get_dataloader(
-        dataset_name = train_cfg.dataset,
-        split        = train_cfg.dataset_split,
-        seq_len      = train_cfg.seq_len,
-        batch_size   = train_cfg.batch_size,
-        num_workers  = train_cfg.num_workers,
-        subset       = subset,
-    )
+    is_instruct = (tier == "instruct")
+    if is_instruct:
+        loader = get_instruct_dataloader(
+            seq_len     = train_cfg.seq_len,
+            batch_size  = train_cfg.batch_size,
+            num_workers = train_cfg.num_workers,
+            mask_prompt = True,
+        )
+    else:
+        subset = "sample-10BT" if "fineweb" in train_cfg.dataset.lower() else None
+        loader = get_dataloader(
+            dataset_name = train_cfg.dataset,
+            split        = train_cfg.dataset_split,
+            seq_len      = train_cfg.seq_len,
+            batch_size   = train_cfg.batch_size,
+            num_workers  = train_cfg.num_workers,
+            subset       = subset,
+        )
     data_iter = iter(loader)
 
     # ── Log file ──────────────────────────────────────────────────────────────
@@ -211,16 +220,24 @@ def train(tier: str = "smoke", resume: str | None = None):
                 data_iter = iter(loader)
                 batch = next(data_iter)
 
-            batch      = batch.to(device)
-            input_ids  = batch[:, :-1]
-            labels     = batch[:, 1:]
+            if is_instruct:
+                # Instruct loader yields (input_ids, labels) with prompt masked
+                input_ids, labels = batch[0].to(device), batch[1].to(device)
+            else:
+                batch     = batch.to(device)
+                input_ids = batch[:, :-1]
+                labels    = batch[:, 1:]
 
             with amp_ctx:
+                # n_loops is the max ceiling; model returns ponder cost in aux
                 logits, aux = model(input_ids, n_loops=n_loops, return_aux=True)
                 ce = F.cross_entropy(
                     logits.reshape(-1, model_cfg.vocab_size),
                     labels.reshape(-1),
+                    ignore_index=-100,   # masks prompt tokens in instruct mode
                 )
+                
+                # Phase-4: Total Loss = Predictions + Efficiency Penalty
                 loss = (ce + aux) / train_cfg.grad_accum
 
             if scaler:
@@ -247,17 +264,20 @@ def train(tier: str = "smoke", resume: str | None = None):
             t1       = time.time()
             avg_loss = loss_accum / train_cfg.log_every
             avg_aux  = aux_accum  / train_cfg.log_every
-            phase    = "phase-1 (stabilize)" if step < train_cfg.phase1_steps else "phase-2 (adaptive)"
+            
+            # Label based on current milestone
+            phase = "phase-4 (elastic)" if step >= 12000 else "phase-2 (adaptive)"
+            
             tokens_per_sec = (
                 train_cfg.log_every * train_cfg.batch_size *
                 train_cfg.grad_accum * train_cfg.seq_len / (t1 - t0)
             )
             print(
-                f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
+                f"step {step:6d} | loss {avg_loss:.4f} | ponder {avg_aux:.5f} | "
                 f"loops {n_loops} | lr {lr:.2e} | {tokens_per_sec:,.0f} tok/s | {phase}"
             )
             log_file.write(json.dumps({
-                "step": step, "loss": avg_loss, "aux": avg_aux,
+                "step": step, "loss": avg_loss, "ponder": avg_aux,
                 "lr": lr, "n_loops": n_loops,
             }) + "\n")
             log_file.flush()
@@ -281,6 +301,7 @@ def train(tier: str = "smoke", resume: str | None = None):
                 train_cfg_dict = train_cfg.__dict__,
             )
 
+    # Final Save
     save_checkpoint(
         path           = ckpt_dir / "final.pt",
         model          = model,
@@ -292,7 +313,6 @@ def train(tier: str = "smoke", resume: str | None = None):
     )
     log_file.close()
     print(f"\n✓ Training complete — {step} steps")
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Generate-from-checkpoint mode
@@ -330,8 +350,8 @@ def generate_from_checkpoint(ckpt_path: str, tier: str = "smoke"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Anthos training — Think in Streams")
     parser.add_argument("--tier",     type=str, default="smoke",
-                        choices=["smoke", "proof", "research", "ethnic"],
-                        help="Hardware tier: smoke | proof | research | ethnic")
+                        choices=["smoke", "proof", "research", "ethnic", "instruct"],
+                        help="Hardware tier: smoke | proof | research | ethnic | instruct")
     parser.add_argument("--resume",   type=str, default=None,
                         help="Path to checkpoint to resume from")
     parser.add_argument("--generate", type=str, default=None,
