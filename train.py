@@ -1,22 +1,6 @@
 """
 Anthos — Training Script
 Think in Streams.
-
-Usage:
-    # Smoke test (MacBook CPU/MPS, ~10 min, proves loss drops)
-    python train.py --tier smoke
-
-    # Proof run (single A100/4090, ~4 hrs, readable outputs)
-    python train.py --tier proof
-
-    # Research run (4× A100, multi-day)
-    torchrun --nproc_per_node=4 train.py --tier research
-
-    # Resume from checkpoint
-    python train.py --tier proof --resume checkpoints/anthos-proof/step_5000.pt
-
-    # Generate samples from a checkpoint
-    python train.py --tier proof --generate checkpoints/anthos-proof/step_5000.pt
 """
 
 import os
@@ -58,14 +42,6 @@ def get_lr(step: int, warmup: int, max_steps: int, max_lr: float, min_lr: float)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_n_loops(step: int, phase1_steps: int, phase1_loops: int, phase2_loops: int) -> int:
-    """
-    Phase 1 (0 → phase1_steps): fixed loop count, ACT disabled.
-      Goal: loss decreases stably, no NaNs, model learns basic language.
-
-    Phase 2 (phase1_steps+): full adaptive loop count, ACT enabled.
-      Goal: thought tokens learn to use their working memory, halting
-      distribution spreads across loop depths.
-    """
     return phase1_loops if step < phase1_steps else phase2_loops
 
 
@@ -77,6 +53,7 @@ def get_n_loops(step: int, phase1_steps: int, phase1_loops: int, phase2_loops: i
 def generate_samples(model: Anthos, device: str, n_loops: int, n_samples: int = 3) -> list[str]:
     from transformers import AutoTokenizer
     tok    = AutoTokenizer.from_pretrained("gpt2")
+    tok.model_max_length = 2048 # Fixes sequence length warning
     model.eval()
 
     prompts = [
@@ -90,7 +67,7 @@ def generate_samples(model: Anthos, device: str, n_loops: int, n_samples: int = 
         ids = torch.tensor(
             tok.encode(prompt), dtype=torch.long, device=device
         ).unsqueeze(0)
-        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.8, top_k=40)
+        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.6, top_k=40)
         samples.append(tok.decode(out[0].tolist()))
 
     model.train()
@@ -171,7 +148,6 @@ def train(tier: str = "smoke", resume: str | None = None):
     print(f"{'─'*60}\n")
 
     # ── Optimizer ─────────────────────────────────────────────────────────────
-    # Separate weight decay: don't decay biases, norms, embeddings
     decay_params    = [p for n, p in model.named_parameters() if p.requires_grad and p.dim() >= 2]
     no_decay_params = [p for n, p in model.named_parameters() if p.requires_grad and p.dim() <  2]
     optimizer = AdamW(
@@ -216,7 +192,6 @@ def train(tier: str = "smoke", resume: str | None = None):
     optimizer.zero_grad()
 
     while step < train_cfg.max_steps:
-        # ── LR update ─────────────────────────────────────────────────────────
         lr = get_lr(step, train_cfg.warmup_steps, train_cfg.max_steps,
                     train_cfg.learning_rate, train_cfg.min_lr)
         for pg in optimizer.param_groups:
@@ -229,7 +204,6 @@ def train(tier: str = "smoke", resume: str | None = None):
             train_cfg.phase2_loops,
         )
 
-        # ── Gradient accumulation ─────────────────────────────────────────────
         for micro_step in range(train_cfg.grad_accum):
             try:
                 batch = next(data_iter)
@@ -238,8 +212,8 @@ def train(tier: str = "smoke", resume: str | None = None):
                 batch = next(data_iter)
 
             batch      = batch.to(device)
-            input_ids  = batch[:, :-1]   # (B, seq_len)
-            labels     = batch[:, 1:]    # (B, seq_len)
+            input_ids  = batch[:, :-1]
+            labels     = batch[:, 1:]
 
             with amp_ctx:
                 logits, aux = model(input_ids, n_loops=n_loops, return_aux=True)
@@ -257,7 +231,6 @@ def train(tier: str = "smoke", resume: str | None = None):
             loss_accum += ce.item()
             aux_accum  += aux.item()
 
-        # ── Optimizer step ────────────────────────────────────────────────────
         if scaler:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
@@ -270,7 +243,6 @@ def train(tier: str = "smoke", resume: str | None = None):
         optimizer.zero_grad(set_to_none=True)
         step += 1
 
-        # ── Logging ───────────────────────────────────────────────────────────
         if step % train_cfg.log_every == 0:
             t1       = time.time()
             avg_loss = loss_accum / train_cfg.log_every
@@ -292,14 +264,12 @@ def train(tier: str = "smoke", resume: str | None = None):
             loss_accum = aux_accum = 0.0
             t0 = t1
 
-        # ── Sampling ──────────────────────────────────────────────────────────
         if step % train_cfg.sample_every == 0:
             print("\n── Sample outputs ─────────────────────────────────────")
             for sample in generate_samples(model, device, n_loops):
                 print(f"  {sample[:200]}\n")
             print("───────────────────────────────────────────────────────\n")
 
-        # ── Checkpoint ────────────────────────────────────────────────────────
         if step % train_cfg.save_every == 0:
             save_checkpoint(
                 path           = ckpt_dir / f"step_{step:06d}.pt",
@@ -311,7 +281,6 @@ def train(tier: str = "smoke", resume: str | None = None):
                 train_cfg_dict = train_cfg.__dict__,
             )
 
-    # ── Final checkpoint ──────────────────────────────────────────────────────
     save_checkpoint(
         path           = ckpt_dir / "final.pt",
         model          = model,
@@ -323,8 +292,6 @@ def train(tier: str = "smoke", resume: str | None = None):
     )
     log_file.close()
     print(f"\n✓ Training complete — {step} steps")
-    print(f"  Checkpoints: {ckpt_dir}/")
-    print(f"  Log:         {log_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -348,26 +315,23 @@ def generate_from_checkpoint(ckpt_path: str, tier: str = "smoke"):
     ]
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("gpt2")
+    tok.model_max_length = 2048 # Fixes sequence length warning
 
     for prompt in prompts:
         ids = torch.tensor(tok.encode(prompt), dtype=torch.long, device=device).unsqueeze(0)
         with torch.no_grad():
             out = model.generate(ids, max_new_tokens=120, n_loops=train_cfg.phase2_loops,
-                                 temperature=0.85, top_k=40)
+                                 temperature=0.6, top_k=40)
         print(f"PROMPT: {prompt}")
         print(f"OUTPUT: {tok.decode(out[0].tolist())}")
         print()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Anthos training — Think in Streams")
     parser.add_argument("--tier",     type=str, default="smoke",
-                        choices=["smoke", "proof", "research"],
-                        help="Hardware tier: smoke | proof | research")
+                        choices=["smoke", "proof", "research", "ethnic"],
+                        help="Hardware tier: smoke | proof | research | ethnic")
     parser.add_argument("--resume",   type=str, default=None,
                         help="Path to checkpoint to resume from")
     parser.add_argument("--generate", type=str, default=None,

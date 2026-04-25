@@ -189,7 +189,48 @@ def get_training_config(tier: str = "smoke"):
             run_name      = "anthos-research",
         )
 
+    elif tier == "ethnic":
+        # ── MacBook / CPU — same architecture as smoke, ethnic stories dataset ─
+        # Resumes from smoke checkpoint. Uses local data/ethnic_stories.txt.
+        model_cfg = AnthosConfig(
+            vocab_size        = 50257,
+            dim               = 128,
+            n_heads           = 4,
+            n_kv_heads        = 2,
+            max_seq_len       = 256,
+            max_loop_iters    = 16,
+            prelude_layers    = 1,
+            coda_layers       = 1,
+            n_thought_tokens  = 8,
+            attn_type         = "gqa",
+            n_experts         = 4,
+            n_shared_experts  = 1,
+            n_experts_per_tok = 2,
+            expert_dim        = 64,
+            lora_rank         = 4,
+            moe_aux_coef      = 1e-2,
+            act_aux_coef      = 1e-3,
+        )
+        train_cfg = TrainingConfig(
+            device        = auto_device,
+            dtype         = "float32",
+            dataset       = "data/ethnic_stories.txt",   # local file — no HF needed
+            seq_len       = 256,
+            batch_size    = 1,
+            max_steps     = 10_000,
+            warmup_steps  = 200,
+            learning_rate = 1e-4,       # lower LR for fine-tuning from checkpoint
+            grad_accum    = 4,
+            phase1_steps  = 500,
+            phase1_loops  = 8,          # start higher since weights are pre-trained
+            phase2_loops  = 16,
+            log_every     = 25,
+            save_every    = 1_000,
+            sample_every  = 1_000,
+            run_name      = "anthos-ethnic",
+        )
+
     else:
-        raise ValueError(f"Unknown tier '{tier}'. Choose: smoke | proof | research")
+        raise ValueError(f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic")
 
     return model_cfg, train_cfg
