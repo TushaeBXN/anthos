@@ -18,21 +18,24 @@
 
 <div align="center">
   <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
-  <p><em>Full smoke run (v0.1.0) completed on April 23, 2026. Successfully validated tokenization, backpropagation, checkpointing, and all 18 architecture tests on local hardware.</em></p>
+  <p><em>Full smoke + ethnic runs completed on local hardware. 20,000 total training steps across two culturally distinct datasets.</em></p>
 </div>
+
+### Training History
+
+| Run | Dataset | Steps | Max Loops | Starting Loss | Final Loss | Date |
+|---|---|---|---|---|---|---|
+| **smoke** | roneneldan/TinyStories | 10,000 | 16 | 43.27 | 10.99 | Apr 23, 2026 |
+| **ethnic** | Global African Storybook (367 stories) | +10,000 | 16 | 15.79 | 11.48 | Apr 25, 2026 |
 
 | | |
 |---|---|
-| **Date** | April 23, 2026 |
-| **Version** | v0.1.0 |
 | **Device** | MacBook Pro (CPU / float32) |
 | **Parameters** | 6,961,603 |
-| **Dataset** | roneneldan/TinyStories |
-| **Steps** | 10,000 |
-| **Max Loops** | 16 |
-| **Starting Loss** | 43.27 |
-| **Final Loss** | 10.99 |
+| **Total Steps** | 20,000 |
 | **Tests** | 18 / 18 passed ✅ |
+| **Steering** | Sovereign Rogue persona (activation addition) ✅ |
+| **Next** | `proof` tier → `instruct` tier (Alpaca SFT) |
 
 ---
 
