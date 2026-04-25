@@ -217,12 +217,13 @@ def get_training_config(tier: str = "smoke"):
             dataset       = "data/ethnic_stories.txt",   # local file — no HF needed
             seq_len       = 256,
             batch_size    = 1,
-            max_steps     = 10_000,
+            max_steps     = 20_000,     # 10k steps of new fine-tuning on top of smoke
             warmup_steps  = 200,
             learning_rate = 1e-4,       # lower LR for fine-tuning from checkpoint
             grad_accum    = 4,
-            phase1_steps  = 500,
-            phase1_loops  = 8,          # start higher since weights are pre-trained
+            phase1_steps  = 10_500,     # stay in phase-2 (16 loops) immediately
+            phase1_loops  = 16,         # pre-trained weights — skip stabilization
+
             phase2_loops  = 16,
             log_every     = 25,
             save_every    = 1_000,
