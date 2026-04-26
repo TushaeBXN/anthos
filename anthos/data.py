@@ -297,15 +297,17 @@ class ChatInstructDataset(IterableDataset):
 
     def __init__(
         self,
-        tokenizer_path: str = "data/anthos_tokenizer",
+        tokenizer_path: str  = "data/anthos_tokenizer",
         seq_len:        int  = 512,
         mask_prompt:    bool = True,
         split:          str  = "train",
+        max_samples:    int  = 0,    # 0 = use full dataset; N = stop after N conversations
     ):
         super().__init__()
         self.seq_len     = seq_len
         self.mask_prompt = mask_prompt
         self.split       = split
+        self.max_samples = max_samples
 
         from transformers import AutoTokenizer
         self.tok = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -354,7 +356,8 @@ class ChatInstructDataset(IterableDataset):
             streaming = True,
         )
 
-        target = self.seq_len + 1
+        target  = self.seq_len + 1
+        n_seen  = 0
 
         for example in ds:
             convs = example.get("conversations", [])
@@ -383,6 +386,16 @@ class ChatInstructDataset(IterableDataset):
                 torch.tensor(labels,    dtype=torch.long),
             )
 
+            n_seen += 1
+            if self.max_samples and n_seen >= self.max_samples:
+                # Wrap around — keep streaming indefinitely by restarting
+                n_seen = 0
+                ds = load_dataset(
+                    "Open-Orca/SlimOrca",
+                    split     = self.split,
+                    streaming = True,
+                )
+
     def __len__(self):
         return 517_982   # SlimOrca size
 
@@ -393,17 +406,20 @@ def get_chat_dataloader(
     num_workers:    int  = 0,
     tokenizer_path: str  = "data/anthos_tokenizer",
     split:          str  = "train",
+    max_samples:    int  = 0,    # 0 = full dataset; N = CPU-friendly slice
 ) -> DataLoader:
     """
     Returns a DataLoader for SlimOrca chat SFT.
     Batches are (input_ids, labels) with prompt tokens masked to -100.
 
     Run setup_tokenizer.py once before using this loader.
+    Set max_samples=1000 for convo_smoke CPU runs.
     """
     ds = ChatInstructDataset(
         tokenizer_path = tokenizer_path,
         seq_len        = seq_len,
         split          = split,
+        max_samples    = max_samples,
     )
 
     def collate(batch):

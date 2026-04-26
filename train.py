@@ -92,13 +92,19 @@ def train(tier: str = "proof", resume: str | None = None):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_dir = Path("checkpoints/mansa_sovereign")
 
-    # ── SFT-specific overrides ────────────────────────────────────────────────
-    # The Lily Exorcism settings: gentle LR, short run, no catastrophic forgetting.
+    # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):
-        MAX_STEPS    = 500      # Stop before the model forgets everything
-        MAX_LR       = 3e-5    # Whisper, don't shout
+        # The Lily Exorcism settings: gentle LR, short run, no catastrophic forgetting.
+        MAX_STEPS    = 500
+        MAX_LR       = 3e-5
         MIN_LR       = 3e-6
         WARMUP_STEPS = 50
+    elif tier == "convo_smoke":
+        # Patient CPU run — same philosophy as smoke but on conversations.
+        MAX_STEPS    = 10_000
+        MAX_LR       = 5e-5
+        MIN_LR       = 5e-6
+        WARMUP_STEPS = 500
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
@@ -119,25 +125,27 @@ def train(tier: str = "proof", resume: str | None = None):
         # Security: weights_only=False kept for loading old pickles, but warnings expected
         ckpt = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
-        if tier in ("sft", "instruct"):
-            # Fresh optimizer — stale proof-tier momentum would corrupt the gentle SFT LR.
-            # We load the weights only and let Adam start clean at 3e-5.
-            start_step = 0  # SFT always counts from 0 (500-step budget)
-            print("  ✓ SFT mode: optimizer state reset (fresh Adam at 3e-5)")
+        if tier in ("sft", "instruct", "convo_smoke"):
+            # Fresh optimizer — stale momentum from previous tier corrupts the new LR.
+            start_step = 0
+            print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR})")
         else:
             optimizer.load_state_dict(ckpt["optimizer"])
             start_step = ckpt["step"]
 
-    is_sft = (tier == "sft" or tier == "instruct")
+    is_sft = (tier in ("sft", "instruct", "convo_smoke"))
     if is_sft:
         # Use the Anthos tokenizer (50262 tokens) so special tokens are real IDs,
         # not split into unknown pieces by GPT-2's BPE.
         tok_path = "data/anthos_tokenizer"
+        # convo_smoke uses only 1,000 conversations — CPU-friendly slice
+        max_samples = 1000 if tier == "convo_smoke" else 0
         loader = get_chat_dataloader(
             seq_len        = SEQ_LEN,
             batch_size     = train_cfg.batch_size,
             num_workers    = 1,
             tokenizer_path = tok_path,
+            max_samples    = max_samples,
         )
     else:
         loader = get_dataloader(
@@ -208,7 +216,7 @@ def train(tier: str = "proof", resume: str | None = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier",   type=str, default="proof",
-                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft"])
+                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke"])
     parser.add_argument("--resume", type=str, default=None)
     args = parser.parse_args()
     train(tier=args.tier, resume=args.resume)
