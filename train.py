@@ -139,8 +139,14 @@ def train(tier: str = "proof", resume: str | None = None):
         # Use the Anthos tokenizer (50262 tokens) so special tokens are real IDs,
         # not split into unknown pieces by GPT-2's BPE.
         tok_path = "data/anthos_tokenizer"
-        # convo_smoke uses only 1,000 conversations — CPU-friendly slice
-        max_samples = 1000 if tier == "convo_smoke" else 0
+        # convo_smoke: 5k high-quality FineTome conversations, loops indefinitely
+        # sft/instruct: full SlimOrca (517k)
+        if tier == "convo_smoke":
+            max_samples  = 5000
+            dataset_name = "mlabonne/FineTome-100k"
+        else:
+            max_samples  = 0
+            dataset_name = "Open-Orca/SlimOrca"
         # num_workers=0 for CPU runs (collate fn can't be pickled for multiprocessing)
         n_workers = 0 if tier == "convo_smoke" else 1
         loader = get_chat_dataloader(
@@ -149,6 +155,7 @@ def train(tier: str = "proof", resume: str | None = None):
             num_workers    = n_workers,
             tokenizer_path = tok_path,
             max_samples    = max_samples,
+            dataset_name   = dataset_name,
         )
     else:
         loader = get_dataloader(

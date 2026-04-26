@@ -302,12 +302,14 @@ class ChatInstructDataset(IterableDataset):
         mask_prompt:    bool = True,
         split:          str  = "train",
         max_samples:    int  = 0,    # 0 = use full dataset; N = stop after N conversations
+        dataset_name:   str  = "Open-Orca/SlimOrca",  # swap to any ShareGPT-format dataset
     ):
         super().__init__()
-        self.seq_len     = seq_len
-        self.mask_prompt = mask_prompt
-        self.split       = split
-        self.max_samples = max_samples
+        self.seq_len      = seq_len
+        self.mask_prompt  = mask_prompt
+        self.split        = split
+        self.max_samples  = max_samples
+        self.dataset_name = dataset_name
 
         from transformers import AutoTokenizer
         self.tok = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -350,21 +352,19 @@ class ChatInstructDataset(IterableDataset):
     def __iter__(self) -> Iterator[torch.Tensor]:
         from datasets import load_dataset
 
-        ds = load_dataset(
-            "Open-Orca/SlimOrca",
-            split     = self.split,
-            streaming = True,
-        )
+        def _load():
+            return load_dataset(self.dataset_name, split=self.split, streaming=True)
 
-        target  = self.seq_len + 1
-        n_seen  = 0
+        ds     = _load()
+        target = self.seq_len + 1
+        n_seen = 0
 
         for example in ds:
             convs = example.get("conversations", [])
             if len(convs) < 2:
                 continue
 
-            # Extract system / human / gpt turns
+            # Extract system / human / gpt turns (ShareGPT format)
             system   = next((c["value"] for c in convs if c["from"] == "system"),
                             "You are Anthos, a helpful and honest assistant.")
             question = next((c["value"] for c in convs if c["from"] == "human"), "")
@@ -375,7 +375,7 @@ class ChatInstructDataset(IterableDataset):
 
             input_ids, labels = self._format(system, question, response)
 
-            # Truncate
+            # Truncate to model context window
             input_ids = input_ids[:target]
             labels    = labels[:target]
             if len(input_ids) < 4:
@@ -388,13 +388,9 @@ class ChatInstructDataset(IterableDataset):
 
             n_seen += 1
             if self.max_samples and n_seen >= self.max_samples:
-                # Wrap around — keep streaming indefinitely by restarting
+                # Wrap around — loop the small slice indefinitely
                 n_seen = 0
-                ds = load_dataset(
-                    "Open-Orca/SlimOrca",
-                    split     = self.split,
-                    streaming = True,
-                )
+                ds = _load()
 
     def __len__(self):
         return 517_982   # SlimOrca size
@@ -406,20 +402,22 @@ def get_chat_dataloader(
     num_workers:    int  = 0,
     tokenizer_path: str  = "data/anthos_tokenizer",
     split:          str  = "train",
-    max_samples:    int  = 0,    # 0 = full dataset; N = CPU-friendly slice
+    max_samples:    int  = 0,       # 0 = full dataset; N = CPU-friendly slice
+    dataset_name:   str  = "Open-Orca/SlimOrca",
 ) -> DataLoader:
     """
-    Returns a DataLoader for SlimOrca chat SFT.
+    Returns a DataLoader for chat SFT (ShareGPT format).
     Batches are (input_ids, labels) with prompt tokens masked to -100.
 
     Run setup_tokenizer.py once before using this loader.
-    Set max_samples=1000 for convo_smoke CPU runs.
+    Set max_samples=5000 and dataset_name="mlabonne/FineTome-100k" for convo_smoke.
     """
     ds = ChatInstructDataset(
         tokenizer_path = tokenizer_path,
         seq_len        = seq_len,
         split          = split,
         max_samples    = max_samples,
+        dataset_name   = dataset_name,
     )
 
     def collate(batch):
