@@ -27,7 +27,7 @@ from anthos.configs import get_training_config
 parser = argparse.ArgumentParser()
 parser.add_argument("--checkpoint", type=str,   default="checkpoints/anthos-sft/final.pt")
 parser.add_argument("--tier",       type=str,   default="sft",
-                    choices=["smoke", "ethnic", "proof", "instruct", "sft"])
+                    choices=["smoke", "ethnic", "proof", "instruct", "sft", "convo_smoke"])
 parser.add_argument("--loops",      type=int,   default=16)
 parser.add_argument("--max-tokens", type=int,   default=200)
 parser.add_argument("--temp",       type=float, default=0.3)
