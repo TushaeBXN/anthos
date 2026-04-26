@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/logo.png" alt="Anthos Logo" width="300"/>
+  ![Anthos Project Logo](https://ibb.co/6JtCgPJ1)
 
   <h1>Anthos</h1>
   <p><strong>Think in Streams.</strong></p>
