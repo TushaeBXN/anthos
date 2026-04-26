@@ -353,7 +353,21 @@ class ChatInstructDataset(IterableDataset):
         from datasets import load_dataset
 
         def _load():
-            return load_dataset(self.dataset_name, split=self.split, streaming=True)
+            # Local JSONL file (teacher-generated data) or HuggingFace dataset
+            if self.dataset_name.endswith(".jsonl") or self.dataset_name.endswith(".json"):
+                import json as _json
+                from pathlib import Path as _Path
+
+                def _local_stream():
+                    while True:   # loop forever like HF streaming
+                        with open(self.dataset_name) as fh:
+                            for line in fh:
+                                line = line.strip()
+                                if line:
+                                    yield _json.loads(line)
+                return _local_stream()
+            else:
+                return load_dataset(self.dataset_name, split=self.split, streaming=True)
 
         ds     = _load()
         target = self.seq_len + 1
@@ -388,9 +402,9 @@ class ChatInstructDataset(IterableDataset):
 
             n_seen += 1
             if self.max_samples and n_seen >= self.max_samples:
-                # Wrap around — loop the small slice indefinitely
+                # Wrap around — loop the slice indefinitely
                 n_seen = 0
-                ds = _load()
+                ds     = _load()
 
     def __len__(self):
         return 517_982   # SlimOrca size

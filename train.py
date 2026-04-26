@@ -142,8 +142,16 @@ def train(tier: str = "proof", resume: str | None = None):
         # convo_smoke: 5k high-quality FineTome conversations, loops indefinitely
         # sft/instruct: full SlimOrca (517k)
         if tier == "convo_smoke":
-            max_samples  = 5000
-            dataset_name = "mlabonne/FineTome-100k"
+            # Use local teacher-generated data if available, else fall back to FineTome
+            local_data = "data/teacher_conversations.jsonl"
+            if Path(local_data).exists():
+                dataset_name = local_data
+                max_samples  = 0   # local file loops itself
+                print(f"  ✓ Using local teacher data: {local_data}")
+            else:
+                dataset_name = "mlabonne/FineTome-100k"
+                max_samples  = 5000
+                print(f"  ✓ Using FineTome-100k (run generate_teacher_data.py for better results)")
         else:
             max_samples  = 0
             dataset_name = "Open-Orca/SlimOrca"
