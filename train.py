@@ -178,8 +178,8 @@ def train(tier: str = "proof", resume: str | None = None):
                 batch = next(data_iter)
 
             if is_sft:
-                input_ids = batch[0].to(device)
-                labels    = batch[1].to(device)
+                input_ids = batch[0].to(device)[:, :SEQ_LEN]
+                labels    = batch[1].to(device)[:, :SEQ_LEN]
             else:
                 batch     = batch.to(device)
                 # CRITICAL FIX: Ensure batch is truncated to SEQ_LEN to prevent indexing errors
