@@ -25,15 +25,17 @@ from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dat
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
+# These defaults are for proof/smoke tier. SFT overrides are applied below
+# inside train() after the tier is known.
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_STEPS = 10000       # Your new 10k goal
-MAX_LR = 1.0e-4         # Lowered from 3.0e-4 to stop the stuttering
-MIN_LR = 1.0e-5         # Steady floor
-WARMUP_STEPS = 2000     # Gentler start
+MAX_STEPS = 10000       # Your new 10k goal  (SFT → 500)
+MAX_LR = 1.0e-4         # Lowered from 3.0e-4 to stop the stuttering  (SFT → 3e-5)
+MIN_LR = 1.0e-5         # Steady floor  (SFT → 3e-6)
+WARMUP_STEPS = 2000     # Gentler start  (SFT → 50)
 PHASE1_STEPS = 3000     # First 3k steps focus on simple language
 PHASE1_LOOPS = 4        # Start simple (4 loops)
 PHASE2_LOOPS = 16       # Scale to complex thinking (16 loops)
-SEQ_LEN = 1024          # Fixed to prevent indexing errors
+SEQ_LEN = 512           # Fixed to prevent indexing errors
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logic Functions
@@ -54,12 +56,15 @@ def get_n_loops(step: int) -> int:
 def generate_samples(model: Anthos, device: str, n_loops: int, n_samples: int = 3) -> list[str]:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained("gpt2")
+    # CRITICAL FIX: Match the model's SEQ_LEN and enable truncation
     tok.model_max_length = SEQ_LEN
     model.eval()
     prompts = ["Once upon a time", "The small robot looked at", "In a world where"][:n_samples]
     samples = []
     for prompt in prompts:
-        ids = torch.tensor(tok.encode(prompt), dtype=torch.long, device=device).unsqueeze(0)
+        # Fixed: Ensure truncation is handled if a prompt is somehow too long
+        enc = tok(prompt, truncation=True, max_length=SEQ_LEN, return_tensors="pt")
+        ids = enc["input_ids"].to(device)
         out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.3, top_k=40)
         samples.append(tok.decode(out[0].tolist()))
     model.train()
@@ -67,6 +72,7 @@ def generate_samples(model: Anthos, device: str, n_loops: int, n_samples: int = 
 
 def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float):
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Security update: Using weights_only=True where possible in future, but for now standard save
     torch.save({
         "step": step,
         "loss": loss,
@@ -80,9 +86,19 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(tier: str = "proof", resume: str | None = None):
+    global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS
+
     model_cfg, train_cfg = get_training_config(tier)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_dir = Path("checkpoints/mansa_sovereign")
+
+    # ── SFT-specific overrides ────────────────────────────────────────────────
+    # The Lily Exorcism settings: gentle LR, short run, no catastrophic forgetting.
+    if tier in ("sft", "instruct"):
+        MAX_STEPS    = 500      # Stop before the model forgets everything
+        MAX_LR       = 3e-5    # Whisper, don't shout
+        MIN_LR       = 3e-6
+        WARMUP_STEPS = 50
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
@@ -94,22 +110,34 @@ def train(tier: str = "proof", resume: str | None = None):
     print(f"  Max LR:     {MAX_LR} | Loops: {PHASE1_LOOPS}->{PHASE2_LOOPS}")
     print(f"{'─'*60}\n")
 
-    optimizer = AdamW(model.parameters(), lr=MAX_LR, betas=(0.9, 0.95), fused=True)
+    # Fixed: Using standard AdamW for stability; fused=True only if CUDA is available
+    use_fused = True if device == "cuda" else False
+    optimizer = AdamW(model.parameters(), lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
 
     start_step = 0
     if resume:
-        ckpt = torch.load(resume, map_location=device)
+        # Security: weights_only=False kept for loading old pickles, but warnings expected
+        ckpt = torch.load(resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
-        optimizer.load_state_dict(ckpt["optimizer"])
-        start_step = ckpt["step"]
+        if tier in ("sft", "instruct"):
+            # Fresh optimizer — stale proof-tier momentum would corrupt the gentle SFT LR.
+            # We load the weights only and let Adam start clean at 3e-5.
+            start_step = 0  # SFT always counts from 0 (500-step budget)
+            print("  ✓ SFT mode: optimizer state reset (fresh Adam at 3e-5)")
+        else:
+            optimizer.load_state_dict(ckpt["optimizer"])
+            start_step = ckpt["step"]
 
-    is_sft = (tier == "sft")
+    is_sft = (tier == "sft" or tier == "instruct")
     if is_sft:
+        # Use the Anthos tokenizer (50262 tokens) so special tokens are real IDs,
+        # not split into unknown pieces by GPT-2's BPE.
+        tok_path = "data/anthos_tokenizer"
         loader = get_chat_dataloader(
-            seq_len        = train_cfg.seq_len,
+            seq_len        = SEQ_LEN,
             batch_size     = train_cfg.batch_size,
-            num_workers    = 4,
-            tokenizer_path = "data/anthos_tokenizer",
+            num_workers    = 1,
+            tokenizer_path = tok_path,
         )
     else:
         loader = get_dataloader(
@@ -117,7 +145,7 @@ def train(tier: str = "proof", resume: str | None = None):
             split        = "train",
             seq_len      = SEQ_LEN,
             batch_size   = train_cfg.batch_size,
-            num_workers  = 4,
+            num_workers  = 1, # Fixed: Forced to 1 to match single shard datasets
         )
     data_iter = iter(loader)
 
@@ -144,10 +172,11 @@ def train(tier: str = "proof", resume: str | None = None):
                 labels    = batch[1].to(device)
             else:
                 batch     = batch.to(device)
-                input_ids = batch[:, :-1]
-                labels    = batch[:, 1:]
+                # CRITICAL FIX: Ensure batch is truncated to SEQ_LEN to prevent indexing errors
+                input_ids = batch[:, :SEQ_LEN-1]
+                labels    = batch[:, 1:SEQ_LEN]
 
-            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.amp.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
                 logits, aux = model(input_ids, n_loops=n_loops, return_aux=True)
                 ce = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
                 loss = (ce + aux) / train_cfg.grad_accum
