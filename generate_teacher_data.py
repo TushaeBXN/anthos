@@ -96,18 +96,16 @@ SYSTEM_PROMPT = (
 
 
 def generate_conversations(n: int, out_path: str, max_new_tokens: int = 200):
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-    import torch
+    import urllib.request
 
-    print(f"\nLoading TinyLlama-1.1B-Chat (teacher)...")
-    tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-    model = AutoModelForCausalLM.from_pretrained(
-        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-        torch_dtype=torch.float32,
-    )
-    model.eval()
-    total = sum(p.numel() for p in model.parameters())
-    print(f"Teacher parameters: {total:,}")
+    # Test Ollama is running
+    try:
+        urllib.request.urlopen("http://localhost:11434")
+    except Exception:
+        print("ERROR: Ollama is not running. Start it with: ollama serve")
+        return
+
+    print(f"\nUsing TinyLlama via Ollama (no PyTorch version issues)")
     print(f"Generating {n} conversations → {out_path}\n")
 
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -117,30 +115,30 @@ def generate_conversations(n: int, out_path: str, max_new_tokens: int = 200):
         while written < n:
             prompt = random.choice(PROMPTS)
 
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user",   "content": prompt},
-            ]
+            payload = json.dumps({
+                "model":  "tinyllama",
+                "prompt": f"<|system|>\n{SYSTEM_PROMPT}</s>\n<|user|>\n{prompt}</s>\n<|assistant|>\n",
+                "stream": False,
+                "options": {
+                    "temperature": 0.7,
+                    "top_p":       0.9,
+                    "num_predict": max_new_tokens,
+                }
+            }).encode()
 
-            text = tok.apply_chat_template(
-                messages,
-                tokenize         = False,
-                add_generation_prompt = True,
+            req = urllib.request.Request(
+                "http://localhost:11434/api/generate",
+                data    = payload,
+                headers = {"Content-Type": "application/json"},
             )
-            inputs = tok(text, return_tensors="pt")
 
-            with torch.no_grad():
-                out = model.generate(
-                    **inputs,
-                    max_new_tokens = max_new_tokens,
-                    temperature    = 0.7,
-                    top_p          = 0.9,
-                    do_sample      = True,
-                    pad_token_id   = tok.eos_token_id,
-                )
-
-            new_tokens = out[0, inputs["input_ids"].shape[1]:]
-            response   = tok.decode(new_tokens, skip_special_tokens=True).strip()
+            try:
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    result   = json.loads(resp.read())
+                    response = result.get("response", "").strip()
+            except Exception as e:
+                print(f"  Warning: request failed ({e}), skipping")
+                continue
 
             if len(response) < 20:
                 continue   # skip degenerate outputs
