@@ -140,10 +140,12 @@ def train(tier: str = "proof", resume: str | None = None):
         tok_path = "data/anthos_tokenizer"
         # convo_smoke uses only 1,000 conversations — CPU-friendly slice
         max_samples = 1000 if tier == "convo_smoke" else 0
+        # num_workers=0 for CPU runs (collate fn can't be pickled for multiprocessing)
+        n_workers = 0 if tier == "convo_smoke" else 1
         loader = get_chat_dataloader(
             seq_len        = SEQ_LEN,
             batch_size     = train_cfg.batch_size,
-            num_workers    = 1,
+            num_workers    = n_workers,
             tokenizer_path = tok_path,
             max_samples    = max_samples,
         )
