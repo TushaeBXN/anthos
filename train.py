@@ -86,7 +86,7 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(tier: str = "proof", resume: str | None = None):
-    global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS
+    global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN
 
     model_cfg, train_cfg = get_training_config(tier)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -105,6 +105,7 @@ def train(tier: str = "proof", resume: str | None = None):
         MAX_LR       = 5e-5
         MIN_LR       = 5e-6
         WARMUP_STEPS = 500
+        SEQ_LEN      = 256   # match convo_smoke model's max_seq_len
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
