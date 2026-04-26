@@ -20,37 +20,42 @@ def migrate(src_path: str, dst_path: str):
     sd   = ckpt["model"]
 
     # ── 1. Vocab: 50257 → 50262 (5 new special tokens) ──────────────────────
-    OLD_V, NEW_V, DIM = 50257, 50262, 512
+    OLD_V, NEW_V = 50257, 50262
     extra = NEW_V - OLD_V   # 5
 
     for key in ("embed.weight", "head.weight"):
         if key in sd:
-            old = sd[key]                         # (OLD_V, DIM)
-            # New rows initialised to ~0 (small random, matches embedding init)
-            new_rows = torch.zeros(extra, DIM)
+            old = sd[key]                         # (OLD_V, dim)
+            dim = old.shape[1]                    # auto-detect: 128 (smoke) or 512 (proof)
+            new_rows = torch.zeros(extra, dim)
             torch.nn.init.normal_(new_rows, std=0.02)
             sd[key] = torch.cat([old, new_rows], dim=0)
             print(f"  {key}: {old.shape} → {sd[key].shape}")
 
-    # ── 2. loop_embeds buffer: 8 → 16 ────────────────────────────────────────
-    OLD_L, NEW_L = 8, 16
+    # ── 2. loop_embeds buffer: existing → 16 ────────────────────────────────
+    NEW_L = 16
     key = "recurrent.loop_embeds"
     if key in sd:
-        old = sd[key]                              # (OLD_L, DIM)
-        # Extend with zeros — the sinusoidal values will be overwritten by the
-        # model's register_buffer on load, but we need the right shape now.
-        pad = torch.zeros(NEW_L - OLD_L, old.shape[1])
-        sd[key] = torch.cat([old, pad], dim=0)
-        print(f"  {key}: {old.shape} → {sd[key].shape}")
+        old   = sd[key]                            # (OLD_L, dim)
+        OLD_L = old.shape[0]
+        if OLD_L < NEW_L:
+            pad = torch.zeros(NEW_L - OLD_L, old.shape[1])
+            sd[key] = torch.cat([old, pad], dim=0)
+            print(f"  {key}: {old.shape} → {sd[key].shape}")
+        else:
+            print(f"  {key}: already {old.shape}, no change needed")
 
-    # ── 3. LoRA scale embedding: 8 → 16 ──────────────────────────────────────
+    # ── 3. LoRA scale embedding: existing → 16 ───────────────────────────────
     key = "recurrent.lora.scale.weight"
     if key in sd:
-        old  = sd[key]                             # (OLD_L, rank)
-        # New rows init to ones — matches nn.init.ones_ at model creation
-        pad  = torch.ones(NEW_L - OLD_L, old.shape[1])
-        sd[key] = torch.cat([old, pad], dim=0)
-        print(f"  {key}: {old.shape} → {sd[key].shape}")
+        old   = sd[key]                            # (OLD_L, rank)
+        OLD_L = old.shape[0]
+        if OLD_L < NEW_L:
+            pad = torch.ones(NEW_L - OLD_L, old.shape[1])
+            sd[key] = torch.cat([old, pad], dim=0)
+            print(f"  {key}: {old.shape} → {sd[key].shape}")
+        else:
+            print(f"  {key}: already {old.shape}, no change needed")
 
     # ── Save ──────────────────────────────────────────────────────────────────
     ckpt["model"] = sd
