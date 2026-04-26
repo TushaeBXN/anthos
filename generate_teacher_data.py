@@ -99,10 +99,10 @@ def generate_conversations(n: int, out_path: str, max_new_tokens: int = 200):
     from transformers import AutoTokenizer, AutoModelForCausalLM
     import torch
 
-    print(f"\nLoading Qwen2-0.5B-Instruct (teacher)...")
-    tok = AutoTokenizer.from_pretrained("Qwen/Qwen2-0.5B-Instruct")
+    print(f"\nLoading TinyLlama-1.1B-Chat (teacher)...")
+    tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
     model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2-0.5B-Instruct",
+        "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
         torch_dtype=torch.float32,
     )
     model.eval()
