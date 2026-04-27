@@ -30,7 +30,7 @@ parser.add_argument("--tier",       type=str,   default="sft",
                     choices=["smoke", "ethnic", "proof", "instruct", "sft", "convo_smoke"])
 parser.add_argument("--loops",      type=int,   default=16)
 parser.add_argument("--max-tokens", type=int,   default=200)
-parser.add_argument("--temp",       type=float, default=0.3)
+parser.add_argument("--temp",       type=float, default=0.7)
 parser.add_argument("--tokenizer",  type=str,   default="data/anthos_tokenizer")
 args = parser.parse_args()
 
@@ -38,7 +38,7 @@ args = parser.parse_args()
 
 from transformers import AutoTokenizer
 
-sft_mode = (args.tier == "sft")
+sft_mode = (args.tier in ("sft", "convo_smoke"))
 tok_path = args.tokenizer if (sft_mode and Path(args.tokenizer).exists()) else "gpt2"
 
 print(f"\nLoading tokenizer from: {tok_path}")
