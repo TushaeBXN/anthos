@@ -284,6 +284,9 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     avg_loss   = 0.0   # FIX: initialize so save_checkpoint never hits NameError
     t0         = time.time()
 
+    print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
+    print(f"  ⏳ First log will appear after step {LOG_EVERY} (may take 1-2 min on CPU)...", flush=True)
+
     while step < MAX_STEPS:
         lr     = get_lr(step)
         for pg in optimizer.param_groups: pg["lr"] = lr
@@ -353,7 +356,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             avg_loss = loss_accum / (LOG_EVERY * train_cfg.grad_accum)
             avg_aux  = aux_accum  / (LOG_EVERY * train_cfg.grad_accum)
             tok_sec  = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
-            print(f"step {step:6d} | loss {avg_loss:.4f} | ponder {avg_aux:.5f} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s")
+            print(f"step {step:6d} | loss {avg_loss:.4f} | ponder {avg_aux:.5f} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s", flush=True)
             loss_accum = aux_accum = 0.0
             t0 = t1
 
