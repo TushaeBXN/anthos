@@ -21,9 +21,38 @@ from anthos.main import (
     anthos_100b,
 )
 
+from anthos.sae import (
+    SAEConfig,
+    SparseAutoencoder,
+    AnthosSAESuite,
+)
+
+from anthos.steering import (
+    AnthosSteer,
+    ActivationCollector,
+    ActivationSteering,
+    LTIStateSteering,
+)
+
+from anthos.sasft import (
+    FeatureSuppressionLoss,
+    RepetitionPenaltyLoss,
+    ThoughtDiversityLoss,
+)
+
+from anthos.features import (
+    feature_rank,
+    discover_features,
+    monolinguality_score,
+    repetition_features,
+    FeatureClassifier,
+    FeatureInterpreter,
+)
+
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"
 __all__ = [
+    # Core architecture
     "AnthosConfig",
     "Anthos",
     "ThoughtTokenPool",
@@ -38,4 +67,24 @@ __all__ = [
     "anthos_10b",
     "anthos_50b",
     "anthos_100b",
+    # SAE
+    "SAEConfig",
+    "SparseAutoencoder",
+    "AnthosSAESuite",
+    # Steering
+    "AnthosSteer",
+    "ActivationCollector",
+    "ActivationSteering",
+    "LTIStateSteering",
+    # SASFT losses
+    "FeatureSuppressionLoss",
+    "RepetitionPenaltyLoss",
+    "ThoughtDiversityLoss",
+    # Feature analysis
+    "feature_rank",
+    "discover_features",
+    "monolinguality_score",
+    "repetition_features",
+    "FeatureClassifier",
+    "FeatureInterpreter",
 ]

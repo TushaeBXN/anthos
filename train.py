@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
 from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader
+from anthos.sasft   import RepetitionPenaltyLoss, ThoughtDiversityLoss
+from anthos.steering import ActivationCollector
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
@@ -113,6 +115,15 @@ def train(tier: str = "proof", resume: str | None = None):
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
+
+    # ── SAE auxiliary losses (SASFT) ─────────────────────────────────────────
+    rep_loss_fn   = RepetitionPenaltyLoss(ngram_size=4, penalty=0.3)
+    div_loss_fn   = ThoughtDiversityLoss(coeff=0.05)
+    thought_collector = ActivationCollector(
+        model, stream="thought",
+        n_thought_tokens=model_cfg.n_thought_tokens,
+    )
+    thought_collector.attach()
 
     print(f"\n{'─'*60}")
     print(f"  Anthos — Sovereign Training (Mansa Edition)")
@@ -207,8 +218,18 @@ def train(tier: str = "proof", resume: str | None = None):
 
             with torch.amp.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
                 logits, aux = model(input_ids, n_loops=n_loops, return_aux=True)
-                ce   = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
-                loss = (ce + aux) / train_cfg.grad_accum
+                ce      = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
+                rep_pen = rep_loss_fn(logits)
+                thought_acts = thought_collector.flat_activations().to(device)
+                n_thought = model_cfg.n_thought_tokens
+                if thought_acts.shape[0] >= n_thought:
+                    div_pen = div_loss_fn(
+                        thought_acts.view(-1, n_thought, model_cfg.dim)
+                    )
+                else:
+                    div_pen = torch.tensor(0.0, device=device)
+                thought_collector.clear()
+                loss = (ce + aux + rep_pen + div_pen) / train_cfg.grad_accum
 
             loss.backward()
             loss_accum += ce.item()
