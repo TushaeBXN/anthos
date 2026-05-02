@@ -40,6 +40,8 @@ PHASE1_STEPS = 3000    # First 3k steps focus on simple language
 PHASE1_LOOPS = 4       # Start simple (4 loops)
 PHASE2_LOOPS = 16      # Scale to complex thinking (16 loops)
 SEQ_LEN      = 512     # Fixed to prevent indexing errors
+LOG_EVERY    = 100     # Print loss every N steps
+SAVE_EVERY   = 1000    # Save checkpoint every N steps
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logic Functions
@@ -94,7 +96,7 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 # ─────────────────────────────────────────────────────────────────────────────
 
 def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None):
-    global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN
+    global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY
 
     model_cfg, train_cfg = get_training_config(tier)
     device   = "cuda" if torch.cuda.is_available() else "cpu"
@@ -122,6 +124,8 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         MIN_LR       = 3e-6
         WARMUP_STEPS = 100
         SEQ_LEN      = 256    # match history model's max_seq_len
+        LOG_EVERY    = 10     # print every 10 steps so you see activity quickly
+        SAVE_EVERY   = 500    # checkpoint every 500 steps
     elif tier == "distill":
         # Offline knowledge distillation — student learns from saved teacher labels.
         MAX_STEPS    = 10_000
@@ -344,16 +348,16 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         optimizer.step()
         step += 1
 
-        if step % 100 == 0:
+        if step % LOG_EVERY == 0:
             t1       = time.time()
-            avg_loss = loss_accum / (100 * train_cfg.grad_accum)
-            avg_aux  = aux_accum  / (100 * train_cfg.grad_accum)
-            tok_sec  = (100 * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
+            avg_loss = loss_accum / (LOG_EVERY * train_cfg.grad_accum)
+            avg_aux  = aux_accum  / (LOG_EVERY * train_cfg.grad_accum)
+            tok_sec  = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
             print(f"step {step:6d} | loss {avg_loss:.4f} | ponder {avg_aux:.5f} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s")
             loss_accum = aux_accum = 0.0
             t0 = t1
 
-        if step % 1000 == 0:
+        if step % SAVE_EVERY == 0:
             # FIX: save checkpoint FIRST — a crash in generate_samples never costs a checkpoint again
             save_checkpoint(ckpt_dir / f"step_{step:06d}.pt", model, optimizer, step, avg_loss)
             print("\n── Sample outputs ─────────────────────────────────────")
