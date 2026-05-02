@@ -25,6 +25,7 @@ from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dat
 from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
 from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
+from anthos.distill       import DistillConfig, DistillationLoss, TeacherLabelDataset
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
@@ -92,7 +93,7 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 # Main Training Loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train(tier: str = "proof", resume: str | None = None):
+def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN
 
     model_cfg, train_cfg = get_training_config(tier)
@@ -113,6 +114,12 @@ def train(tier: str = "proof", resume: str | None = None):
         MIN_LR       = 5e-6
         WARMUP_STEPS = 500
         SEQ_LEN      = 256   # match convo_smoke model's max_seq_len
+    elif tier == "distill":
+        # Offline knowledge distillation — student learns from saved teacher labels.
+        MAX_STEPS    = 10_000
+        MAX_LR       = 2e-4
+        MIN_LR       = 2e-5
+        WARMUP_STEPS = 500
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
@@ -152,7 +159,8 @@ def train(tier: str = "proof", resume: str | None = None):
             optimizer.load_state_dict(ckpt["optimizer"])
             start_step = ckpt["step"]
 
-    is_sft = (tier in ("sft", "instruct", "convo_smoke"))
+    is_sft     = (tier in ("sft", "instruct", "convo_smoke"))
+    is_distill = (tier == "distill")
 
     # FIX: determine the correct tokenizer path once, use everywhere
     if is_sft:
@@ -160,7 +168,47 @@ def train(tier: str = "proof", resume: str | None = None):
     else:
         tok_path = "gpt2"
 
-    if is_sft:
+    if is_distill:
+        # ── Distillation loader ───────────────────────────────────────────────
+        labels_path = teacher_labels or "data/teacher_labels.jsonl"
+        if not Path(labels_path).exists():
+            raise FileNotFoundError(
+                f"Teacher labels not found: {labels_path}\n"
+                f"Run: python generate_teacher_labels.py --teacher <model> --out {labels_path}"
+            )
+        print(f"  ✓ Distill mode: loading teacher labels from {labels_path}")
+        from torch.utils.data import DataLoader
+
+        def _distill_collate(batch):
+            """Pad (input_ids, teacher_logits) pairs to same sequence length."""
+            ids_list  = [x[0] for x in batch]
+            tlog_list = [x[1] for x in batch]
+            max_T = max(t.shape[0] for t in ids_list)
+            V = tlog_list[0].shape[-1]
+            ids_pad  = torch.zeros(len(batch), max_T, dtype=torch.long)
+            tlog_pad = torch.full((len(batch), max_T, V), float("-inf"))
+            for i, (ids, tlog) in enumerate(zip(ids_list, tlog_list)):
+                T = ids.shape[0]
+                ids_pad[i, :T]      = ids
+                tlog_pad[i, :T, :V] = tlog[:, :V]
+            return ids_pad, tlog_pad
+
+        teacher_dataset = TeacherLabelDataset(
+            path=labels_path,
+            student_vocab_size=model_cfg.vocab_size,
+            teacher_vocab_size=model_cfg.vocab_size,   # same tokenizer by default
+        )
+        loader = DataLoader(
+            teacher_dataset,
+            batch_size=train_cfg.batch_size,
+            shuffle=True,
+            collate_fn=_distill_collate,
+            num_workers=0,
+        )
+        distill_loss_fn = DistillationLoss(DistillConfig(temperature=4.0, alpha=0.3))
+        tok_path = "gpt2"
+
+    elif is_sft:
         if tier == "convo_smoke":
             local_data = "data/teacher_conversations.jsonl"
             if Path(local_data).exists():
@@ -224,28 +272,46 @@ def train(tier: str = "proof", resume: str | None = None):
                 data_iter = iter(loader)
                 batch     = next(data_iter)
 
-            if is_sft:
-                input_ids = batch[0].to(device)[:, :SEQ_LEN]
-                labels    = batch[1].to(device)[:, :SEQ_LEN]
+            if is_distill:
+                input_ids       = batch[0].to(device)[:, :SEQ_LEN]
+                teacher_logits  = batch[1].to(device)[:, :SEQ_LEN, :]
+                labels          = input_ids[:, 1:]
+                input_ids_in    = input_ids[:, :-1]
+            elif is_sft:
+                input_ids       = batch[0].to(device)[:, :SEQ_LEN]
+                labels          = batch[1].to(device)[:, :SEQ_LEN]
+                input_ids_in    = input_ids
             else:
-                batch     = batch.to(device)
-                input_ids = batch[:, :SEQ_LEN-1]
-                labels    = batch[:, 1:SEQ_LEN]
+                batch        = batch.to(device)
+                input_ids_in = batch[:, :SEQ_LEN-1]
+                labels       = batch[:, 1:SEQ_LEN]
 
             with torch.amp.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=torch.bfloat16):
-                logits, aux = model(input_ids, n_loops=n_loops, return_aux=True)
-                ce      = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
-                rep_pen = rep_loss_fn(logits)
-                thought_acts = thought_collector.flat_activations().to(device)
-                n_thought = model_cfg.n_thought_tokens
-                if thought_acts.shape[0] >= n_thought:
-                    div_pen = div_loss_fn(
-                        thought_acts.view(-1, n_thought, model_cfg.dim)
+                logits, aux = model(input_ids_in, n_loops=n_loops, return_aux=True)
+
+                if is_distill:
+                    # Knowledge distillation: soft KL + hard CE
+                    t_log = teacher_logits[:, :-1, :]   # align positions
+                    loss_kd, kd_info = distill_loss_fn(
+                        student_logits=logits,
+                        teacher_logits=t_log,
+                        labels=labels,
                     )
+                    ce  = torch.tensor(kd_info["ce_loss"], device=device)
+                    loss = (loss_kd + aux) / train_cfg.grad_accum
                 else:
-                    div_pen = torch.tensor(0.0, device=device)
-                thought_collector.clear()
-                loss = (ce + aux + rep_pen + div_pen) / train_cfg.grad_accum
+                    ce      = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
+                    rep_pen = rep_loss_fn(logits)
+                    thought_acts = thought_collector.flat_activations().to(device)
+                    n_thought = model_cfg.n_thought_tokens
+                    if thought_acts.shape[0] >= n_thought:
+                        div_pen = div_loss_fn(
+                            thought_acts.view(-1, n_thought, model_cfg.dim)
+                        )
+                    else:
+                        div_pen = torch.tensor(0.0, device=device)
+                    thought_collector.clear()
+                    loss = (ce + aux + rep_pen + div_pen) / train_cfg.grad_accum
 
             loss.backward()
             loss_accum += ce.item()
@@ -281,7 +347,9 @@ def train(tier: str = "proof", resume: str | None = None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier",   type=str, default="proof",
-                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke"])
+                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill"])
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--teacher_labels", type=str, default=None,
+                        help="Path to teacher soft-label JSONL (required for --tier distill)")
     args = parser.parse_args()
-    train(tier=args.tier, resume=args.resume)
+    train(tier=args.tier, resume=args.resume, teacher_labels=args.teacher_labels)

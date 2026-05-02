@@ -63,6 +63,30 @@ from anthos.memory_compress import (
     compress_jsonl,
 )
 
+from anthos.distill import (
+    DistillConfig,
+    DistillationLoss,
+    TeacherLabelGenerator,
+    TeacherLabelDataset,
+    OnlineDistiller,
+)
+
+from anthos.export import (
+    export_safetensors,
+    export_hf_config,
+    export_gguf_metadata,
+    quantize_model,
+    export_for_deployment,
+)
+
+from anthos.kv_cache import (
+    CacheConfig,
+    SequenceKVCache,
+    LTIStateCache,
+    AnthosCache,
+    CachedGenerator,
+)
+
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"
 __all__ = [
@@ -111,4 +135,22 @@ __all__ = [
     "ESCompressor",
     "MemoryAugmentedDataset",
     "compress_jsonl",
+    # Distillation
+    "DistillConfig",
+    "DistillationLoss",
+    "TeacherLabelGenerator",
+    "TeacherLabelDataset",
+    "OnlineDistiller",
+    # Export / deployment
+    "export_safetensors",
+    "export_hf_config",
+    "export_gguf_metadata",
+    "quantize_model",
+    "export_for_deployment",
+    # KV cache
+    "CacheConfig",
+    "SequenceKVCache",
+    "LTIStateCache",
+    "AnthosCache",
+    "CachedGenerator",
 ]
