@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
-from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader
+from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader, get_markdown_dataloader
 from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
 from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
@@ -114,6 +114,13 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         MIN_LR       = 5e-6
         WARMUP_STEPS = 500
         SEQ_LEN      = 256   # match convo_smoke model's max_seq_len
+    elif tier == "history":
+        # Fine-tune on local markdown essays (Brian Thomas — New History).
+        # Small dataset, loops forever — stop manually or at MAX_STEPS.
+        MAX_STEPS    = 5_000
+        MAX_LR       = 3e-5   # gentle — these are precious few documents
+        MIN_LR       = 3e-6
+        WARMUP_STEPS = 100
     elif tier == "distill":
         # Offline knowledge distillation — student learns from saved teacher labels.
         MAX_STEPS    = 10_000
@@ -159,8 +166,9 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             optimizer.load_state_dict(ckpt["optimizer"])
             start_step = ckpt["step"]
 
-    is_sft     = (tier in ("sft", "instruct", "convo_smoke"))
-    is_distill = (tier == "distill")
+    is_sft      = (tier in ("sft", "instruct", "convo_smoke"))
+    is_distill  = (tier == "distill")
+    is_history  = (tier == "history")
 
     # FIX: determine the correct tokenizer path once, use everywhere
     if is_sft:
@@ -168,7 +176,19 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     else:
         tok_path = "gpt2"
 
-    if is_distill:
+    if is_history:
+        # ── Local markdown essay loader ────────────────────────────────────────
+        history_dir = "data/new_history"
+        print(f"  ✓ History tier: training on markdown essays in {history_dir}/")
+        loader  = get_markdown_dataloader(
+            directory  = history_dir,
+            seq_len    = SEQ_LEN,
+            batch_size = train_cfg.batch_size,
+            num_workers= 0,
+        )
+        tok_path = "gpt2"
+
+    elif is_distill:
         # ── Distillation loader ───────────────────────────────────────────────
         labels_path = teacher_labels or "data/teacher_labels.jsonl"
         if not Path(labels_path).exists():
@@ -282,6 +302,8 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                 labels          = batch[1].to(device)[:, :SEQ_LEN]
                 input_ids_in    = input_ids
             else:
+                # pretrain-style: batch is (B, seq_len+1) raw tensor
+                # also used by history tier (LocalMarkdownDataset same contract)
                 batch        = batch.to(device)
                 input_ids_in = batch[:, :SEQ_LEN-1]
                 labels       = batch[:, 1:SEQ_LEN]
@@ -347,7 +369,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier",   type=str, default="proof",
-                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill"])
+                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history"])
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--teacher_labels", type=str, default=None,
                         help="Path to teacher soft-label JSONL (required for --tier distill)")

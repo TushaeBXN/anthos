@@ -121,6 +121,102 @@ class LocalPackedTextDataset(IterableDataset):
         return 10_000_000   # streaming sentinel
 
 
+class LocalMarkdownDataset(IterableDataset):
+    """
+    Reads every .md file in a directory, tokenizes with GPT-2, and yields
+    packed (seq_len+1,) tensors — same contract as LocalPackedTextDataset.
+
+    Loops indefinitely so training can run for any MAX_STEPS.
+    Files are read in sorted order each epoch so output is deterministic.
+
+    Markdown syntax (headers, bold markers, horizontal rules) is preserved
+    by default — the model learns to read your document structure.
+    Pass strip_markdown=True to train on clean prose only.
+
+    Args:
+        directory:      path to folder containing .md files
+        seq_len:        context window (model SEQ_LEN)
+        strip_markdown: if True, remove #/*/- markdown characters
+    """
+
+    def __init__(self, directory: str, seq_len: int, strip_markdown: bool = False):
+        super().__init__()
+        import glob, re
+        self.seq_len      = seq_len
+        self.strip_md     = strip_markdown
+
+        paths = sorted(set(
+            glob.glob(f"{directory}/**/*.md", recursive=True) +
+            glob.glob(f"{directory}/*.md")
+        ))
+        if not paths:
+            raise FileNotFoundError(f"No .md files found in {directory}")
+        self.paths = paths
+        print(f"  [LocalMarkdownDataset] Found {len(paths)} markdown files in {directory}")
+
+        from transformers import AutoTokenizer
+        self.tok = AutoTokenizer.from_pretrained("gpt2")
+        self.eos = self.tok.eos_token_id
+
+    def _clean(self, text: str) -> str:
+        """Optionally strip markdown syntax, always clean up whitespace."""
+        import re
+        if self.strip_md:
+            text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)  # headers
+            text = re.sub(r"\*{1,2}(.+?)\*{1,2}", r"\1", text)          # bold/italic
+            text = re.sub(r"^---+\s*$", "", text, flags=re.MULTILINE)   # hr
+            text = re.sub(r"^>\s?", "", text, flags=re.MULTILINE)        # blockquotes
+        text = re.sub(r"\n{3,}", "\n\n", text)   # collapse excess blank lines
+        return text.strip()
+
+    def __iter__(self):
+        target = self.seq_len + 1
+        buffer: list[int] = []
+
+        while True:                          # loop forever
+            for path in self.paths:
+                with open(path, encoding="utf-8") as f:
+                    raw = f.read()
+
+                text   = self._clean(raw)
+                tokens = self.tok.encode(text, add_special_tokens=False)
+                buffer.extend(tokens)
+                buffer.append(self.eos)      # document boundary
+
+                while len(buffer) >= target:
+                    chunk  = buffer[:target]
+                    buffer = buffer[target:]
+                    yield torch.tensor(chunk, dtype=torch.long)
+
+    def __len__(self):
+        return 10_000_000   # streaming sentinel
+
+
+def get_markdown_dataloader(
+    directory:   str,
+    seq_len:     int,
+    batch_size:  int,
+    num_workers: int  = 0,
+    strip_markdown: bool = False,
+) -> DataLoader:
+    """
+    Returns a DataLoader over all .md files in a directory.
+    Yields (B, seq_len+1) tensors — same contract as get_dataloader().
+    Train loop: input_ids = batch[:, :-1], labels = batch[:, 1:]
+    """
+    ds = LocalMarkdownDataset(
+        directory      = directory,
+        seq_len        = seq_len,
+        strip_markdown = strip_markdown,
+    )
+    return DataLoader(
+        ds,
+        batch_size  = batch_size,
+        num_workers = num_workers,
+        pin_memory  = False,
+    )
+
+
 class AlpacaInstructDataset(IterableDataset):
     """
     Streams tatsu-lab/alpaca (52k instruction pairs) and formats each example
