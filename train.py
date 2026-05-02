@@ -121,6 +121,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         MAX_LR       = 3e-5   # gentle — these are precious few documents
         MIN_LR       = 3e-6
         WARMUP_STEPS = 100
+        SEQ_LEN      = 256    # match history model's max_seq_len
     elif tier == "distill":
         # Offline knowledge distillation — student learns from saved teacher labels.
         MAX_STEPS    = 10_000
