@@ -69,7 +69,7 @@ def _find_recurrent_blocks(model: nn.Module) -> list[nn.Module]:
     """
     blocks = []
     for module in model.modules():
-        if type(module).__name__ == "RecurrentBlock":
+        if type(module).__name__ in ("RecurrentBlock", "AnthosRecurrentBlock"):
             blocks.append(module)
     return blocks
 
