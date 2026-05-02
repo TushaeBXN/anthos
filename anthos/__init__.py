@@ -49,6 +49,20 @@ from anthos.features import (
     FeatureInterpreter,
 )
 
+from anthos.memory import (
+    MemoryBankConfig,
+    MemoryBankState,
+    MemoryBank,
+    ExternalMemoryReader,
+    MemoryAugmentedAnthos,
+)
+
+from anthos.memory_compress import (
+    ESCompressor,
+    MemoryAugmentedDataset,
+    compress_jsonl,
+)
+
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"
 __all__ = [
@@ -87,4 +101,14 @@ __all__ = [
     "repetition_features",
     "FeatureClassifier",
     "FeatureInterpreter",
+    # Memory
+    "MemoryBankConfig",
+    "MemoryBankState",
+    "MemoryBank",
+    "ExternalMemoryReader",
+    "MemoryAugmentedAnthos",
+    # Memory compression / training augmentation
+    "ESCompressor",
+    "MemoryAugmentedDataset",
+    "compress_jsonl",
 ]

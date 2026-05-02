@@ -55,6 +55,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Memory bank — imported lazily inside AnthosRecurrentBlock to avoid circular import
+# at module load time (memory.py imports torch but not anthos.main)
+from anthos.memory import MemoryBank, MemoryBankConfig, MemoryBankState
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -600,6 +604,15 @@ class AnthosRecurrentBlock(nn.Module):
         # ACT halting (sequence only — thoughts run every loop)
         self.act = ACTHalting(cfg.dim)
 
+        # MemoryBank — persistent KV memory that thought tokens attend to (Layer 1)
+        # Extends thought stream's effective memory without increasing sequence length.
+        # State persists across loop iterations within a forward pass.
+        self.memory_bank = MemoryBank(MemoryBankConfig(
+            d_model=cfg.dim,
+            n_slots=512,
+            n_heads=cfg.n_heads,
+        ))
+
         # Precomputed loop-index sinusoidal embeddings
         self.loop_dim = cfg.dim // 8
         loop_table    = _build_loop_embeddings(cfg.max_loop_iters, cfg.dim, self.loop_dim)
@@ -607,14 +620,15 @@ class AnthosRecurrentBlock(nn.Module):
 
     def forward(
         self,
-        h:         torch.Tensor,
-        thoughts:  torch.Tensor,
-        e:         torch.Tensor,
-        freqs_cis: torch.Tensor,
-        n_loops:   Optional[int]  = None,
-        kv_cache:  Optional[dict] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (h_out, moe_aux_total, act_aux). All differentiable."""
+        h:            torch.Tensor,
+        thoughts:     torch.Tensor,
+        e:            torch.Tensor,
+        freqs_cis:    torch.Tensor,
+        n_loops:      Optional[int]              = None,
+        kv_cache:     Optional[dict]             = None,
+        memory_state: Optional[MemoryBankState]  = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState]:
+        """Returns (h_out, moe_aux_total, act_aux, memory_state). All differentiable."""
         n_loops = n_loops or self.cfg.max_loop_iters
 
         B, T, D = h.shape
@@ -643,6 +657,8 @@ class AnthosRecurrentBlock(nn.Module):
             seq_out     = full_out[:, self.n_thought:,  :]
 
             thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
+            # MemoryBank read+write: thought tokens attend to persistent KV memory
+            thoughts, memory_state = self.memory_bank(thoughts, memory_state)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             p             = self.act(h)
@@ -661,7 +677,7 @@ class AnthosRecurrentBlock(nn.Module):
                 break
 
         act_aux = loops_used.mean()  # differentiable ACT penalty
-        return h_out, moe_aux_total, act_aux
+        return h_out, moe_aux_total, act_aux, memory_state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -732,10 +748,11 @@ class Anthos(nn.Module):
 
     def forward(
         self,
-        input_ids:  torch.Tensor,
-        n_loops:    Optional[int]  = None,
-        kv_cache:   Optional[dict] = None,
-        return_aux: bool           = False,
+        input_ids:    torch.Tensor,
+        n_loops:      Optional[int]             = None,
+        kv_cache:     Optional[dict]            = None,
+        return_aux:   bool                      = False,
+        memory_state: Optional[MemoryBankState] = None,
     ):
         """
         Args:
@@ -767,7 +784,10 @@ class Anthos(nn.Module):
         # ── Anthos Recurrent Block ────────────────────────────────────────
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
-        x, moe_aux, act_aux = self.recurrent(x, thoughts, e, freqs_cis, n_loops, kv_cache)
+        x, moe_aux, act_aux, memory_state = self.recurrent(
+            x, thoughts, e, freqs_cis, n_loops, kv_cache, memory_state
+        )
+        self._last_memory_state = memory_state   # expose for stateful inference wrappers
 
         # ── Coda ──────────────────────────────────────────────────────────
         for i, layer in enumerate(self.coda):

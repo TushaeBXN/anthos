@@ -22,8 +22,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
 from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader
-from anthos.sasft   import RepetitionPenaltyLoss, ThoughtDiversityLoss
-from anthos.steering import ActivationCollector
+from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
+from anthos.steering      import ActivationCollector
+from anthos.memory_compress import MemoryAugmentedDataset
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
@@ -138,7 +139,11 @@ def train(tier: str = "proof", resume: str | None = None):
     start_step = 0
     if resume:
         ckpt = torch.load(resume, map_location=device, weights_only=False)
-        model.load_state_dict(ckpt["model"])
+        # strict=False: new parameters (memory_bank) are randomly initialized when
+        # loading pre-memory-integration checkpoints — no crash, clean warm start.
+        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+        if missing:
+            print(f"  ℹ New params (randomly init): {len(missing)} tensors — e.g. {missing[0]}")
         if tier in ("sft", "instruct", "convo_smoke"):
             # Fresh optimizer — stale momentum from previous tier corrupts the new LR.
             start_step = 0
@@ -186,6 +191,17 @@ def train(tier: str = "proof", resume: str | None = None):
             seq_len      = SEQ_LEN,
             batch_size   = train_cfg.batch_size,
             num_workers  = 1,
+        )
+
+    # ── ES memory augmentation (proof + sft/instruct tiers) ──────────────────
+    # Teaches Anthos to read Engram Shorthand notation by injecting ES-compressed
+    # memory prefixes into 15% of training examples. Gracefully no-ops when the
+    # loader yields tensors (items pass through the else branch unchanged).
+    if tier in ("proof", "sft", "instruct"):
+        loader = MemoryAugmentedDataset(
+            loader,
+            compress_fraction=0.15,
+            prefix_confidence=3,
         )
 
     data_iter = iter(loader)
