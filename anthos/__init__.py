@@ -21,6 +21,43 @@ from anthos.main import (
     anthos_100b,
 )
 
+from anthos.lora_pairs import (
+    DualLoRAAdapter,
+)
+
+from anthos.eaft import (
+    EAFTLoss,
+    StandardLoss,
+)
+
+from anthos.grpo import (
+    GRPOConfig,
+    GRPOTrainer,
+    quality_reward,
+    loop_efficiency_reward,
+)
+
+from anthos.multipack import (
+    MultipackDataset,
+    MultipackSampler,
+    multipack_collate,
+    build_pack_mask_fast,
+)
+
+from anthos.quant import (
+    QuantConfig,
+    detect_device,
+    get_dtype,
+    load_quantized,
+    FP8Linear,
+)
+
+from anthos.train_additions import (
+    build_dataloader,
+    build_loss,
+    training_step,
+)
+
 from anthos.sae import (
     SAEConfig,
     SparseAutoencoder,
@@ -153,4 +190,29 @@ __all__ = [
     "LTIStateCache",
     "AnthosCache",
     "CachedGenerator",
+    # Dual LoRA
+    "DualLoRAAdapter",
+    # EAFT loss
+    "EAFTLoss",
+    "StandardLoss",
+    # GRPO
+    "GRPOConfig",
+    "GRPOTrainer",
+    "quality_reward",
+    "loop_efficiency_reward",
+    # Multipack
+    "MultipackDataset",
+    "MultipackSampler",
+    "multipack_collate",
+    "build_pack_mask_fast",
+    # Quantization (FP8 inference)
+    "QuantConfig",
+    "detect_device",
+    "get_dtype",
+    "load_quantized",
+    "FP8Linear",
+    # Training integration
+    "build_dataloader",
+    "build_loss",
+    "training_step",
 ]

@@ -319,6 +319,115 @@ output = gen.generate(input_ids, max_new_tokens=256, n_loops=12)
 
 ---
 
+### GRPO — Reinforcement Learning for the Thought Stream
+
+GRPO teaches the thought stream to reason deliberately by rewarding good completions rather than relying solely on next-token prediction.
+
+```python
+from anthos.grpo import GRPOTrainer, GRPOConfig, quality_reward
+
+trainer = GRPOTrainer.from_pretrained(
+    checkpoint_path = "checkpoints/mansa_sovereign/step_005000.pt",
+    model_class     = Anthos,
+    cfg             = model_cfg,
+    tokenizer       = tokenizer,
+    grpo_config     = GRPOConfig(n_completions=8, kl_coef=0.05),
+)
+
+for batch in loader:
+    loss = trainer.step(batch["input_ids"])
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+```
+
+Reward functions: `quality_reward` (diversity + repetition penalty), `loop_efficiency_reward` (fewer loops = higher reward). Plug in any custom reward model for stronger signal. **Run GRPO after pretraining is stable — not from scratch.**
+
+---
+
+### EAFT — Entropy-Aware Focal Training Loss
+
+Weights the cross-entropy loss by position-level entropy — uncertain positions get more gradient, confident ones get less. Pairs with the Anthos ACT halting signal: positions that needed more loop iterations receive extra weight automatically.
+
+```python
+from anthos.eaft import EAFTLoss
+
+criterion = EAFTLoss(
+    vocab_size      = cfg.vocab_size,
+    top_k           = 50,
+    focal_gamma     = 1.0,   # entropy weight strength (0 = standard CE)
+    act_gamma       = 0.5,   # extra weight for high-ponder positions
+    label_smoothing = 0.1,
+)
+
+# In training loop — drops in as a direct replacement for F.cross_entropy
+loops_used = getattr(model, "_last_loops_used", None)
+loss = criterion(logits, labels, attention_mask=mask, loops_used=loops_used)
+```
+
+---
+
+### Multipack — Sequence Packing
+
+Eliminates padding waste by bin-packing variable-length sequences into fixed-length chunks. Each chunk is ~100% token-utilised. Includes a block-diagonal attention mask that prevents cross-document attention leakage inside a pack.
+
+```python
+from anthos.multipack import MultipackDataset, MultipackSampler, multipack_collate
+from torch.utils.data import DataLoader
+
+dataset = MultipackDataset(
+    file_paths = [Path("data/new_history/essay1.md"), ...],
+    tokenizer  = tokenizer,
+    chunk_len  = 4096,
+)
+loader = DataLoader(dataset, batch_size=2, sampler=MultipackSampler(dataset),
+                    collate_fn=multipack_collate)
+```
+
+Or use the one-liner builder from `train_additions.py`:
+```python
+from anthos.train_additions import build_dataloader
+loader = build_dataloader("data/new_history", tokenizer, chunk_len=256)
+```
+
+---
+
+### Dual LoRA — Depth-Adaptive Adapters
+
+Replaces the single LoRA adapter with two independent paths blended by loop depth. Early loops use the `fast_lora` path (content routing); late loops use the `deep_lora` path (reasoning integration). The blend temperature is a learned scalar — already wired into `AnthosRecurrentBlock` in `main.py`.
+
+---
+
+### FP8 Quantization (Inference)
+
+```python
+from anthos.quant import load_quantized, QuantConfig
+
+model = load_quantized(
+    model,
+    "checkpoints/mansa_sovereign/step_005000.pt",
+    quant_cfg = QuantConfig(mode="auto"),   # fp8 on H100, bf16 elsewhere
+)
+```
+
+FP8 cuts inference memory ~50% vs BF16. Requires H100 for true FP8; auto-falls back to BF16 on older GPUs and MPS.
+
+---
+
+### RunPod Serverless
+
+```bash
+# Local test
+python -m anthos.serve --test
+
+# Deploy — set env vars and point RunPod to your Docker image
+# MODEL_CHECKPOINT=checkpoints/... QUANT_MODE=auto N_LOOPS=12
+```
+
+The server exposes an OpenAI-compatible `/v1/completions` endpoint with Engram memory retrieval and FP8 quantization built in. See `anthos/serve.py` for the full Dockerfile instructions.
+
+---
+
 ### Export & Deployment
 
 ```python
@@ -384,6 +493,13 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 | [`anthos/distill.py`](anthos/distill.py) | Knowledge distillation pipeline |
 | [`anthos/kv_cache.py`](anthos/kv_cache.py) | Bifurcated KV cache for fast generation |
 | [`anthos/export.py`](anthos/export.py) | Safetensors, HF config, GGUF export |
+| [`anthos/eaft.py`](anthos/eaft.py) | Entropy-Aware Focal Training loss |
+| [`anthos/grpo.py`](anthos/grpo.py) | Group Relative Policy Optimization |
+| [`anthos/multipack.py`](anthos/multipack.py) | Sequence packing — eliminates padding waste |
+| [`anthos/lora_pairs.py`](anthos/lora_pairs.py) | Dual LoRA adapter (fast/deep loop paths) |
+| [`anthos/quant.py`](anthos/quant.py) | FP8 inference quantization |
+| [`anthos/serve.py`](anthos/serve.py) | RunPod serverless worker (OpenAI-compatible) |
+| [`anthos/train_additions.py`](anthos/train_additions.py) | Drop-in training integration shim |
 
 ---
 

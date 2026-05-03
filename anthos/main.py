@@ -57,7 +57,8 @@ import torch.nn.functional as F
 
 # Memory bank — imported lazily inside AnthosRecurrentBlock to avoid circular import
 # at module load time (memory.py imports torch but not anthos.main)
-from anthos.memory import MemoryBank, MemoryBankConfig, MemoryBankState
+from anthos.memory     import MemoryBank, MemoryBankConfig, MemoryBankState
+from anthos.lora_pairs import DualLoRAAdapter
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -589,7 +590,7 @@ class AnthosRecurrentBlock(nn.Module):
         self.n_thought = cfg.n_thought_tokens
 
         self.block = TransformerBlock(cfg, use_moe=True)
-        self.lora  = LoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
+        self.lora  = DualLoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
 
         # Separate LTI injections for sequence and thought streams
         self.seq_injection     = LTIInjection(cfg.dim)
@@ -627,8 +628,8 @@ class AnthosRecurrentBlock(nn.Module):
         n_loops:      Optional[int]              = None,
         kv_cache:     Optional[dict]             = None,
         memory_state: Optional[MemoryBankState]  = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState]:
-        """Returns (h_out, moe_aux_total, act_aux, memory_state). All differentiable."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor]:
+        """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used). All differentiable."""
         n_loops = n_loops or self.cfg.max_loop_iters
 
         B, T, D = h.shape
@@ -638,6 +639,7 @@ class AnthosRecurrentBlock(nn.Module):
         loops_used   = torch.zeros(B, T,    device=h.device)
 
         e_normed      = self.e_norm(e)
+        e_summary     = e.mean(dim=1)                                        # [B, D] — cold-start conditioning for MemoryBank
         e_thought     = e.mean(dim=1, keepdim=True).expand_as(thoughts)
         combined_mask = _anthos_causal_mask(self.n_thought, T, h.device) if T > 1 else None
         moe_aux_total = h.new_zeros(1)
@@ -658,7 +660,7 @@ class AnthosRecurrentBlock(nn.Module):
 
             thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
             # MemoryBank read+write: thought tokens attend to persistent KV memory
-            thoughts, memory_state = self.memory_bank(thoughts, memory_state)
+            thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             p             = self.act(h)
@@ -677,7 +679,7 @@ class AnthosRecurrentBlock(nn.Module):
                 break
 
         act_aux = loops_used.mean()  # differentiable ACT penalty
-        return h_out, moe_aux_total, act_aux, memory_state
+        return h_out, moe_aux_total, act_aux, memory_state, loops_used
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -784,10 +786,11 @@ class Anthos(nn.Module):
         # ── Anthos Recurrent Block ────────────────────────────────────────
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
-        x, moe_aux, act_aux, memory_state = self.recurrent(
+        x, moe_aux, act_aux, memory_state, loops_used = self.recurrent(
             x, thoughts, e, freqs_cis, n_loops, kv_cache, memory_state
         )
         self._last_memory_state = memory_state   # expose for stateful inference wrappers
+        self._last_loops_used   = loops_used     # expose for EAFT loss weighting
 
         # ── Coda ──────────────────────────────────────────────────────────
         for i, layer in enumerate(self.coda):
