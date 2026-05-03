@@ -26,22 +26,21 @@ from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
 from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
 from anthos.distill       import DistillConfig, DistillationLoss, TeacherLabelDataset
+from anthos.eaft          import EAFTLoss
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
-# These defaults are for proof/smoke tier. SFT overrides are applied below
-# inside train() after the tier is known.
 # ─────────────────────────────────────────────────────────────────────────────
-MAX_STEPS    = 10000    # Your new 10k goal  (SFT → 500)
-MAX_LR       = 1.0e-4  # Lowered from 3.0e-4 to stop the stuttering  (SFT → 3e-5)
-MIN_LR       = 1.0e-5  # Steady floor  (SFT → 3e-6)
-WARMUP_STEPS = 2000    # Gentler start  (SFT → 50)
-PHASE1_STEPS = 3000    # First 3k steps focus on simple language
-PHASE1_LOOPS = 4       # Start simple (4 loops)
-PHASE2_LOOPS = 16      # Scale to complex thinking (16 loops)
-SEQ_LEN      = 512     # Fixed to prevent indexing errors
-LOG_EVERY    = 100     # Print loss every N steps
-SAVE_EVERY   = 1000    # Save checkpoint every N steps
+MAX_STEPS    = 10000
+MAX_LR       = 1.0e-4
+MIN_LR       = 1.0e-5
+WARMUP_STEPS = 2000
+PHASE1_STEPS = 3000
+PHASE1_LOOPS = 4
+PHASE2_LOOPS = 16
+SEQ_LEN      = 512
+LOG_EVERY    = 100
+SAVE_EVERY   = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Logic Functions
@@ -64,7 +63,7 @@ def generate_samples(
     device: str,
     n_loops: int,
     n_samples: int = 3,
-    tokenizer_path: str = "gpt2",   # FIX: accept tokenizer path instead of hardcoding gpt2
+    tokenizer_path: str = "gpt2",
 ) -> list[str]:
     from transformers import AutoTokenizer
     tok = AutoTokenizer.from_pretrained(tokenizer_path)
@@ -73,7 +72,6 @@ def generate_samples(
     prompts = ["Once upon a time", "The small robot looked at", "In a world where"][:n_samples]
     samples = []
     for prompt in prompts:
-        # Encode without return_tensors to avoid transformers PyTorch version check
         enc = tok.encode(prompt, truncation=True, max_length=SEQ_LEN)
         ids = torch.tensor([enc], dtype=torch.long).to(device)
         out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.3, top_k=40)
@@ -104,30 +102,25 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
     # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):
-        # The Lily Exorcism settings: gentle LR, short run, no catastrophic forgetting.
         MAX_STEPS    = 500
         MAX_LR       = 3e-5
         MIN_LR       = 3e-6
         WARMUP_STEPS = 50
     elif tier == "convo_smoke":
-        # Patient CPU run — same philosophy as smoke but on conversations.
         MAX_STEPS    = 10_000
         MAX_LR       = 5e-5
         MIN_LR       = 5e-6
         WARMUP_STEPS = 500
-        SEQ_LEN      = 256   # match convo_smoke model's max_seq_len
+        SEQ_LEN      = 256
     elif tier == "history":
-        # Fine-tune on local markdown essays (Brian Thomas — New History).
-        # Small dataset, loops forever — stop manually or at MAX_STEPS.
         MAX_STEPS    = 5_000
-        MAX_LR       = 3e-5   # gentle — these are precious few documents
+        MAX_LR       = 3e-5
         MIN_LR       = 3e-6
         WARMUP_STEPS = 100
-        SEQ_LEN      = 256    # match history model's max_seq_len
-        LOG_EVERY    = 10     # print every 10 steps so you see activity quickly
-        SAVE_EVERY   = 500    # checkpoint every 500 steps
+        SEQ_LEN      = 256
+        LOG_EVERY    = 10
+        SAVE_EVERY   = 500
     elif tier == "distill":
-        # Offline knowledge distillation — student learns from saved teacher labels.
         MAX_STEPS    = 10_000
         MAX_LR       = 2e-4
         MIN_LR       = 2e-5
@@ -136,7 +129,15 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
 
-    # ── SAE auxiliary losses (SASFT) ─────────────────────────────────────────
+    # ── Loss functions ────────────────────────────────────────────────────────
+    eaft_criterion = EAFTLoss(
+        vocab_size      = model_cfg.vocab_size,
+        top_k           = 50,
+        focal_gamma     = 1.0,   # entropy weight: uncertain positions get more gradient
+        act_gamma       = 0.5,   # extra weight for positions that used more loops
+        max_loops       = model_cfg.max_loop_iters,
+        label_smoothing = 0.1,
+    )
     rep_loss_fn   = RepetitionPenaltyLoss(ngram_size=4, penalty=0.3)
     div_loss_fn   = ThoughtDiversityLoss(coeff=0.05)
     thought_collector = ActivationCollector(
@@ -158,13 +159,10 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     start_step = 0
     if resume:
         ckpt = torch.load(resume, map_location=device, weights_only=False)
-        # strict=False: new parameters (memory_bank) are randomly initialized when
-        # loading pre-memory-integration checkpoints — no crash, clean warm start.
         missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
         if missing:
             print(f"  ℹ New params (randomly init): {len(missing)} tensors — e.g. {missing[0]}")
-        if tier in ("sft", "instruct", "convo_smoke"):
-            # Fresh optimizer — stale momentum from previous tier corrupts the new LR.
+        if tier in ("sft", "instruct", "convo_smoke", "history"):
             start_step = 0
             print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR})")
         else:
@@ -175,14 +173,12 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     is_distill  = (tier == "distill")
     is_history  = (tier == "history")
 
-    # FIX: determine the correct tokenizer path once, use everywhere
     if is_sft:
         tok_path = "data/anthos_tokenizer"
     else:
         tok_path = "gpt2"
 
     if is_history:
-        # ── Local markdown essay loader ────────────────────────────────────────
         history_dir = "data/new_history"
         print(f"  ✓ History tier: training on markdown essays in {history_dir}/")
         loader  = get_markdown_dataloader(
@@ -194,7 +190,6 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         tok_path = "gpt2"
 
     elif is_distill:
-        # ── Distillation loader ───────────────────────────────────────────────
         labels_path = teacher_labels or "data/teacher_labels.jsonl"
         if not Path(labels_path).exists():
             raise FileNotFoundError(
@@ -205,7 +200,6 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         from torch.utils.data import DataLoader
 
         def _distill_collate(batch):
-            """Pad (input_ids, teacher_logits) pairs to same sequence length."""
             ids_list  = [x[0] for x in batch]
             tlog_list = [x[1] for x in batch]
             max_T = max(t.shape[0] for t in ids_list)
@@ -221,7 +215,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         teacher_dataset = TeacherLabelDataset(
             path=labels_path,
             student_vocab_size=model_cfg.vocab_size,
-            teacher_vocab_size=model_cfg.vocab_size,   # same tokenizer by default
+            teacher_vocab_size=model_cfg.vocab_size,
         )
         loader = DataLoader(
             teacher_dataset,
@@ -266,10 +260,6 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             num_workers  = 1,
         )
 
-    # ── ES memory augmentation (proof + sft/instruct tiers) ──────────────────
-    # Teaches Anthos to read Engram Shorthand notation by injecting ES-compressed
-    # memory prefixes into 15% of training examples. Gracefully no-ops when the
-    # loader yields tensors (items pass through the else branch unchanged).
     if tier in ("proof", "sft", "instruct"):
         loader = MemoryAugmentedDataset(
             loader,
@@ -281,7 +271,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     model.train()
     step       = start_step
     loss_accum = aux_accum = 0.0
-    avg_loss   = 0.0   # FIX: initialize so save_checkpoint never hits NameError
+    avg_loss   = 0.0
     t0         = time.time()
 
     print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
@@ -310,8 +300,6 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                 labels          = batch[1].to(device)[:, :SEQ_LEN]
                 input_ids_in    = input_ids
             else:
-                # pretrain-style: batch is (B, seq_len+1) raw tensor
-                # also used by history tier (LocalMarkdownDataset same contract)
                 batch        = batch.to(device)
                 input_ids_in = batch[:, :SEQ_LEN-1]
                 labels       = batch[:, 1:SEQ_LEN]
@@ -320,8 +308,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                 logits, aux = model(input_ids_in, n_loops=n_loops, return_aux=True)
 
                 if is_distill:
-                    # Knowledge distillation: soft KL + hard CE
-                    t_log = teacher_logits[:, :-1, :]   # align positions
+                    t_log = teacher_logits[:, :-1, :]
                     loss_kd, kd_info = distill_loss_fn(
                         student_logits=logits,
                         teacher_logits=t_log,
@@ -330,13 +317,21 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                     ce  = torch.tensor(kd_info["ce_loss"], device=device)
                     loss = (loss_kd + aux) / train_cfg.grad_accum
                 else:
-                    ce      = F.cross_entropy(logits.reshape(-1, model_cfg.vocab_size), labels.reshape(-1))
+                    # EAFT: entropy-aware focal loss — uncertain positions (high
+                    # entropy) and positions that used more ACT loops get more gradient
+                    loops_used = getattr(model, "_last_loops_used", None)
+                    ce         = eaft_criterion(logits, labels, loops_used=loops_used)
                     rep_pen = rep_loss_fn(logits)
                     thought_acts = thought_collector.flat_activations().to(device)
-                    n_thought = model_cfg.n_thought_tokens
-                    if thought_acts.shape[0] >= n_thought:
+                    n_thought    = model_cfg.n_thought_tokens
+                    # ── FIX: trim thought_acts to a clean multiple of (n_thought * dim)
+                    # before reshape. Raw activations can be any size depending on
+                    # batch/seq combinations; the view requires exact divisibility.
+                    chunk = n_thought * model_cfg.dim
+                    if thought_acts.shape[0] >= chunk:
+                        trimmed = thought_acts[: (thought_acts.shape[0] // chunk) * chunk]
                         div_pen = div_loss_fn(
-                            thought_acts.view(-1, n_thought, model_cfg.dim)
+                            trimmed.view(-1, n_thought, model_cfg.dim)
                         )
                     else:
                         div_pen = torch.tensor(0.0, device=device)
@@ -361,11 +356,9 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             t0 = t1
 
         if step % SAVE_EVERY == 0:
-            # FIX: save checkpoint FIRST — a crash in generate_samples never costs a checkpoint again
             save_checkpoint(ckpt_dir / f"step_{step:06d}.pt", model, optimizer, step, avg_loss)
             print("\n── Sample outputs ─────────────────────────────────────")
             try:
-                # FIX: pass the correct tokenizer path
                 for sample in generate_samples(model, device, n_loops, tokenizer_path=tok_path):
                     print(f"  {sample[:200]}\n")
             except Exception as e:

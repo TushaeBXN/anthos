@@ -88,7 +88,9 @@ class AnthosConfig:
     # Thought tokens are discarded before the Coda — they leave no output trace.
 
     # Attention flavour: "gqa" | "mla"
-    attn_type:     str   = "mla"
+    # Default is "gqa" — matches all training tier configs.
+    # Use "mla" for anthos_1b+ variants (set explicitly in _base()).
+    attn_type:     str   = "gqa"
 
     # MLA parameters (ignored when attn_type="gqa")
     kv_lora_rank:      int = 512
