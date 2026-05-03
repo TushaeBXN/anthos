@@ -142,17 +142,19 @@ class LocalMarkdownDataset(IterableDataset):
     def __init__(self, directory: str, seq_len: int, strip_markdown: bool = False):
         super().__init__()
         import glob, re
+        from pathlib import Path
         self.seq_len      = seq_len
         self.strip_md     = strip_markdown
 
-        paths = sorted(set(
+        # Store absolute paths — avoids cwd-sensitivity when the loop restarts
+        raw_paths = sorted(set(
             glob.glob(f"{directory}/**/*.md", recursive=True) +
             glob.glob(f"{directory}/*.md")
         ))
-        if not paths:
+        if not raw_paths:
             raise FileNotFoundError(f"No .md files found in {directory}")
-        self.paths = paths
-        print(f"  [LocalMarkdownDataset] Found {len(paths)} markdown files in {directory}")
+        self.paths = [str(Path(p).resolve()) for p in raw_paths]
+        print(f"  [LocalMarkdownDataset] Found {len(self.paths)} markdown files in {directory}")
 
         from transformers import AutoTokenizer
         self.tok = AutoTokenizer.from_pretrained("gpt2")
@@ -175,8 +177,12 @@ class LocalMarkdownDataset(IterableDataset):
 
         while True:                          # loop forever
             for path in self.paths:
-                with open(path, encoding="utf-8") as f:
-                    raw = f.read()
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        raw = f.read()
+                except FileNotFoundError:
+                    print(f"  [LocalMarkdownDataset] ⚠ Skipping missing file: {path}")
+                    continue
 
                 text   = self._clean(raw)
                 tokens = self.tok.encode(text, add_special_tokens=False)

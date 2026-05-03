@@ -74,7 +74,7 @@ def generate_samples(
     for prompt in prompts:
         enc = tok.encode(prompt, truncation=True, max_length=SEQ_LEN)
         ids = torch.tensor([enc], dtype=torch.long).to(device)
-        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.3, top_k=40)
+        out = model.generate(ids, max_new_tokens=80, n_loops=n_loops, temperature=0.8, top_k=40)
         samples.append(tok.decode(out[0].tolist()))
     model.train()
     return samples
