@@ -178,6 +178,8 @@ loss.backward()
 | `instruct` | GPU | Alpaca 52k | 500 | Instruction following |
 | `sft` | GPU | SlimOrca 517k | 500 | Conversation fine-tune |
 | `history` | CPU/GPU | Local markdown files | 5,000 | Domain/style fine-tuning |
+| `ethnic` | CPU/GPU | Global African Storybook | 10,000 | Cultural domain fine-tuning |
+| `convo_smoke` | GPU | Claude-generated teacher data | 50,000–150,000 | Instruction following (teacher distill) |
 | `distill` | CPU/GPU | Teacher labels (offline) | 10,000 | Knowledge distillation |
 
 ```bash
@@ -188,7 +190,27 @@ python3 train.py --tier history
 
 # Resume from checkpoint
 python3 train.py --tier sft --resume checkpoints/mansa_sovereign/step_010000.pt
+
+# Override steps at the command line (new)
+python3 train.py --tier convo_smoke \
+  --resume checkpoints/mansa_sovereign/step_001700.pt \
+  --steps 150000
 ```
+
+### Teacher Data Pipeline
+
+Anthos uses Claude Haiku as a teacher model to generate high-quality instruction-following training data:
+
+```bash
+# Generate 5,000 teacher conversations (~$8 on Claude API)
+python3 generate_claude_data.py --n 5000 --budget 9.50
+
+# Clean: filter AI-isms, trim verbose responses
+python3 clean_training_data.py
+# → teacher_conversations_clean.jsonl  (4,768 / 5,000 examples kept)
+```
+
+The pipeline covers 60+ topics across 10 instruction templates. Responses are trimmed to ≤200 words and filtered for AI-ism contamination ("As an AI...", "Great question!", etc.) before training.
 
 ### Recommended training phases
 
@@ -449,19 +471,26 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 
 <div align="center">
   <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
-  <p><em>4 training runs across CPU and H100 GPU. 44.9M parameter proof model reached loss 2.90 in under 2 minutes on H100. SFT pipeline with Anthos chat tokens built and ready.</em></p>
+  <p><em>5 training runs across CPU and H100 GPU. 44.9M parameter proof model reached loss 2.90 in under 2 minutes on H100. Teacher data pipeline live — 5,000 Claude-generated instruction examples queued for fine-tuning.</em></p>
 </div>
 
 ### Training History
 
 | Run | Hardware | Dataset | Steps | Params | Final Loss | Date |
 |---|---|---|---|---|---|---|
-| **smoke** | MacBook CPU | TinyStories | 10,000 | 6.9M | 10.99 | Apr 23, 2026 |
-| **ethnic** | MacBook CPU | Global African Storybook | +10,000 | 6.9M | 11.48 | Apr 25, 2026 |
-| **proof** | H100 SXM (RunPod) | TinyStories | 1,700 | 44.9M | 2.90 | Apr 25, 2026 |
-| **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | 44.9M | 3.92 | Apr 25, 2026 |
+| **smoke** | MacBook CPU | TinyStories | 10,000 | **6.9M** | 10.99 | Apr 23, 2026 |
+| **ethnic** | MacBook CPU | Global African Storybook | +10,000 | **6.9M** | 11.48 | Apr 25, 2026 |
+| **proof** | H100 SXM (RunPod) | TinyStories | 1,700 | **44.9M** | 2.90 | Apr 25, 2026 |
+| **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | **44.9M** | 3.92 | Apr 25, 2026 |
+| **convo_smoke** | RTX 3090 (RunPod) | Claude Haiku teacher data (5k) | ~150,000 | **44.9M** | 🔄 in progress | May 2026 |
 
 **Best checkpoint:** `proof` step 1,700 — loss 2.90 (44.9M params)
+
+**Architecture milestones since v0.1:**
+- `v0.1` — 6.9M param smoke model, loss ~11 (MacBook CPU, TinyStories, ~2 hrs)
+- `v0.2` — 44.9M param proof model, loss 2.90 (H100, 1,700 steps, ~2 min)
+- `v0.3` — DualLoRA, EAFT loss, Multipack, FP8 quant, GRPO, Memory Bank all wired
+- `v0.4` — Claude Haiku teacher pipeline: 5k instruction examples, cleaned + shuffled
 
 ---
 
