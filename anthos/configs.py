@@ -376,7 +376,7 @@ def get_training_config(tier: str = "smoke"):
         # Resume from a smoke checkpoint:
         #   python3 train.py --tier history --resume checkpoints/mansa_sovereign/step_010000.pt
         model_cfg = AnthosConfig(
-            vocab_size        = 50257,   # GPT-2 tokenizer
+            vocab_size        = 50262,   # GPT-2 + 5 Anthos special tokens (matches checkpoints)
             dim               = 128,
             n_heads           = 4,
             n_kv_heads        = 2,

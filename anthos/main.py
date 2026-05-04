@@ -88,9 +88,7 @@ class AnthosConfig:
     # Thought tokens are discarded before the Coda — they leave no output trace.
 
     # Attention flavour: "gqa" | "mla"
-    # Default is "gqa" — matches all training tier configs.
-    # Use "mla" for anthos_1b+ variants (set explicitly in _base()).
-    attn_type:     str   = "gqa"
+    attn_type:     str   = "mla"
 
     # MLA parameters (ignored when attn_type="gqa")
     kv_lora_rank:      int = 512
@@ -415,7 +413,7 @@ def _build_loop_embeddings(max_loops: int, dim: int, loop_dim: int, theta: float
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Depth-wise LoRA adapter
+# Depth-wise LoRA adapter (legacy single-path — kept for backward compat)
 # ─────────────────────────────────────────────────────────────────────────────
 
 class LoRAAdapter(nn.Module):

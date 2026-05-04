@@ -93,7 +93,7 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 # Main Training Loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None):
+def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None, max_steps: int | None = None):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY
 
     model_cfg, train_cfg = get_training_config(tier)
@@ -125,6 +125,10 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         MAX_LR       = 2e-4
         MIN_LR       = 2e-5
         WARMUP_STEPS = 500
+
+    # ── CLI override (always applied last) ───────────────────────────────────
+    if max_steps is not None:
+        MAX_STEPS = max_steps
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
@@ -173,7 +177,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     is_distill  = (tier == "distill")
     is_history  = (tier == "history")
 
-    if is_sft:
+    if is_sft and Path("data/anthos_tokenizer").exists():
         tok_path = "data/anthos_tokenizer"
     else:
         tok_path = "gpt2"
@@ -372,7 +376,9 @@ if __name__ == "__main__":
     parser.add_argument("--tier",   type=str, default="proof",
                         choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history"])
     parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--steps",  type=int, default=None,
+                        help="Override MAX_STEPS for this run (e.g. --steps 150000)")
     parser.add_argument("--teacher_labels", type=str, default=None,
                         help="Path to teacher soft-label JSONL (required for --tier distill)")
     args = parser.parse_args()
-    train(tier=args.tier, resume=args.resume, teacher_labels=args.teacher_labels)
+    train(tier=args.tier, resume=args.resume, teacher_labels=args.teacher_labels, max_steps=args.steps)

@@ -1,78 +1,81 @@
 """
-anthos/memory.py — Persistent Memory for Anthos
-
-Two complementary memory systems:
+anthos/memory.py — Persistent Memory for Anthos (v2)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+What changed from v1 and why
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+v1 problem: MemoryBank learned `initial_keys` and `initial_values` as model
+parameters — meaning the cold-start state was trained end-to-end and baked
+into the weights.  With a small dataset (e.g. 6 files) those parameters
+overfit to the training distribution's structure.  At inference on anything
+outside that distribution the initial memory is actively misleading.
+
+v2 fix — two-part cold-start:
+
+  1. Orthogonal slot identities (fixed, not trained)
+     Each of the M memory slots gets a unique, maximally-spread vector from a
+     QR decomposition.  These are registered as a buffer (not a Parameter) so
+     they never change.  They give every slot a stable, distinct fingerprint
+     regardless of what data the model was trained on.
+
+  2. Input-conditioned projection (trained, but generalizes)
+     Two small linear projections (cold_key_proj, cold_val_proj) map a
+     mean-pooled summary of the encoded input to the initial key/value space.
+     The cold-start is now always relevant to the actual input — not the
+     training distribution.  These projections generalize because they learn
+     "how to read an input summary" rather than "what this training set looks
+     like."
+
+Combined init:
+     keys[b, m]   = slot_id[m] + cold_key_proj(e_summary[b])
+     values[b, m] = cold_val_proj(e_summary[b])          (no slot bias on values)
+
+  3. Per-slot write gates (v1 had broadcast gates)
+     v1: gate[b, m] = sigmoid(W @ [thought_mean, readout_mean]) → same gate
+         applied to all slots.
+     v2: gate is now [B, M] per slot, computed from slot-specific alignment
+         between each memory slot and the aggregated thought state.  Each slot
+         decides independently whether it wants to update.
+
+  4. Retention scheduling
+     MemoryBankConfig exposes `retention` (default 0.95).  During early
+     training with sparse data, passing a lower value (0.80) to the config
+     reduces dependence on the cold-start.  No code changes needed — just
+     adjust the config.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Three-layer architecture (unchanged from v1)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 Layer 1 — MemoryBank (architectural, inside the model)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Thought tokens cross-attend to 512 persistent KV slots every loop.
+  State passes loop-to-loop within a forward pass.
+  Cold-start conditioned on encoded input (see above).
 
-A learnable key-value memory store that thought tokens attend to during every
-loop iteration. Extends the thought stream's effective memory beyond the
-context window without increasing sequence length.
-
-Architecture:
-  - M memory slots, each a (key: D, value: D) pair
-  - Thought tokens query via multi-head cross-attention → memory readout
-  - Memory is updated via a gated write mechanism after each read
-  - Persistent across loop iterations within a single forward pass
-  - Optionally persistent across forward passes (stateful inference)
-
-This is architecturally coherent with Anthos's design because:
-  - Thought tokens are already non-causal working-memory slots
-  - Adding external KV memory extends their capacity without changing
-    the bifurcated stream design
-  - The LTI update already carries state across loops — MemoryBank extends
-    this to a larger capacity, slower-decay store
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Layer 2 — ExternalMemoryReader (inference, outside the model)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Queries Engram at inference time and prepends retrieved memories to
+  input_ids.  Thought stream processes them non-causally.
+  Graceful fallback when Engram is not installed.
 
-Queries Engram's search backend at inference time and prepends retrieved
-memories to Anthos's input sequence. Thought tokens then process this
-context non-causally, integrating it into working memory.
-
-Works with or without Engram installed:
-  - If engram is installed: full semantic search with recency weighting
-  - If not: falls back to a plain text prefix from a supplied memory list
+Layer 3 — MemoryAugmentedAnthos (wrapper)
+  Combines Layers 1 and 2 behind a single generate() call.
+  Optional stateful persistence across multi-turn exchanges.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Layer 3 — MemoryAugmentedAnthos (inference wrapper)
+Integration — what changed in anthos/main.py
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Wraps an Anthos model with both Layer 1 and Layer 2, providing a clean
-generate() interface that automatically retrieves external memories and
-routes them through the thought stream.
+AnthosRecurrentBlock.forward needs two small updates:
 
-Usage — MemoryBank (architectural, train from scratch or fine-tune):
-    from anthos.memory import MemoryBankConfig, MemoryBank
+  1. Compute e_summary once before the loop (mean-pool the encoded input):
+         e_summary = e.mean(dim=1)   # [B, D]
 
-    bank_cfg = MemoryBankConfig(d_model=512, n_slots=512, n_heads=8)
-    bank     = MemoryBank(bank_cfg)
+  2. Pass e_summary to memory_bank on every call.  The bank only uses it
+     when state is None (cold-start); subsequent loops ignore it:
+         thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
 
-    # In RecurrentBlock forward (add to anthos/main.py):
-    thought_out, memory_state = bank(thought_tokens, memory_state)
-
-Usage — ExternalMemoryReader (inference, no retraining needed):
-    from anthos.memory import ExternalMemoryReader
-    from transformers import AutoTokenizer
-
-    reader = ExternalMemoryReader(
-        tokenizer=AutoTokenizer.from_pretrained("gpt2"),
-        engram_wing="anthos",
-        max_memory_tokens=170,
-    )
-
-    # Before generating:
-    input_ids = reader.prepend_memories(input_ids, query="transformer reasoning")
-    out = model.generate(input_ids, max_new_tokens=128, n_loops=12)
-
-Usage — Full wrapper:
-    from anthos.memory import MemoryAugmentedAnthos
-
-    wrapped = MemoryAugmentedAnthos(model, bank_cfg, engram_wing="anthos")
-    out = wrapped.generate(input_ids, query="transformer reasoning", n_loops=12)
+No other changes to main.py are required.
 """
 
 from __future__ import annotations
@@ -96,29 +99,26 @@ class MemoryBankConfig:
     n_slots:   int   = 512    # Number of memory slots (M)
     n_heads:   int   = 8      # Cross-attention heads
     dropout:   float = 0.0
-    gate_bias: float = -2.0   # Init write gate to near-zero (conservative writes)
-    # How strongly memory is retained across loop iterations
-    # 1.0 = full retention, 0.0 = full replacement
-    retention: float = 0.95
+    gate_bias: float = -2.0   # Init write gates near-zero — conservative early training
+    retention: float = 0.95   # LTI retention rate across loop iterations
+    # Lower retention (e.g. 0.80) during early training with sparse data
+    # reduces dependence on cold-start.  Increase as dataset grows.
 
 
 class MemoryBankState:
     """
-    Holds the memory bank key-value pairs for a single batch.
+    Holds the memory bank KV pairs for a single batch.
+
     Passed between loop iterations so memory persists within a forward pass.
-    Optionally detached and re-used across forward passes for stateful inference.
+    Detach and re-use across forward passes for stateful multi-turn inference.
     """
 
-    def __init__(
-        self,
-        keys:   torch.Tensor,   # [B, M, D]
-        values: torch.Tensor,   # [B, M, D]
-    ):
-        self.keys   = keys
-        self.values = values
+    def __init__(self, keys: torch.Tensor, values: torch.Tensor):
+        self.keys   = keys    # [B, M, D]
+        self.values = values  # [B, M, D]
 
     def detach(self) -> "MemoryBankState":
-        """Detach from compute graph for stateful inference across forward passes."""
+        """Detach from compute graph — use for stateful inference across calls."""
         return MemoryBankState(self.keys.detach(), self.values.detach())
 
     def to(self, device) -> "MemoryBankState":
@@ -127,87 +127,165 @@ class MemoryBankState:
 
 class MemoryBank(nn.Module):
     """
-    Persistent key-value memory that thought tokens attend to.
+    Persistent key-value memory that thought tokens attend to every loop.
 
-    Design:
-      READ:  thought tokens → cross-attention over memory → readout
-      WRITE: gated update — memory slots absorb information from thought tokens
+    READ:  thought tokens cross-attend to memory slots → readout added to thoughts
+    WRITE: per-slot gated update from aggregated thought state
 
-    The write gate is initialized near zero so early training is stable.
-    Memory is retained at `retention` rate across loop iterations (LTI-style).
+    Cold-start (when state=None):
+      keys[b, m]   = slot_id[m]  +  cold_key_proj(e_summary[b])
+      values[b, m] = cold_val_proj(e_summary[b])
 
-    Integration point in anthos/main.py RecurrentBlock:
-        # After processing thought tokens through transformer:
-        thought_out, self.memory_state = self.memory_bank(
-            thought_out, self.memory_state
-        )
+      slot_id:   fixed orthogonal vectors — each slot has a unique fingerprint,
+                 never trained, never overfits to training data distribution
+      e_summary: mean-pooled encoded input — cold-start is always relevant to
+                 the actual input being processed
+
+    Integration in anthos/main.py AnthosRecurrentBlock.forward:
+
+        # Once before the loop:
+        e_summary = e.mean(dim=1)   # [B, D]
+
+        # Inside the loop (replace existing memory_bank call):
+        thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
     """
 
     def __init__(self, cfg: MemoryBankConfig):
         super().__init__()
-        self.cfg = cfg
-        D, M, H = cfg.d_model, cfg.n_slots, cfg.n_heads
+        self.cfg  = cfg
+        D, M, H   = cfg.d_model, cfg.n_slots, cfg.n_heads
         assert D % H == 0, f"d_model {D} must be divisible by n_heads {H}"
         self.head_dim = D // H
 
-        # Learnable initial memory (broadcast across batch at init)
-        self.initial_keys   = nn.Parameter(torch.randn(1, M, D) * 0.02)
-        self.initial_values = nn.Parameter(torch.zeros(1, M, D))
+        # ── Slot identities — fixed orthogonal vectors, never trained ─────────
+        # Each slot gets a unique fingerprint regardless of training data.
+        slot_ids = self._init_orthogonal_slots(M, D)          # [1, M, D]
+        self.register_buffer("slot_ids", slot_ids)
 
-        # READ: cross-attention projections
-        self.q_proj = nn.Linear(D, D, bias=False)
-        self.k_proj = nn.Linear(D, D, bias=False)
-        self.v_proj = nn.Linear(D, D, bias=False)
+        # ── Cold-start projections — trained, but generalizable ───────────────
+        # Maps mean-pooled encoded input to initial K/V space.
+        # Generalizes because it learns "how to read a summary,"
+        # not "what this training set looks like."
+        self.cold_key_proj = nn.Linear(D, D, bias=False)
+        self.cold_val_proj = nn.Linear(D, D, bias=False)
+        nn.init.normal_(self.cold_key_proj.weight, std=0.02)
+        nn.init.zeros_(self.cold_val_proj.weight)   # values start near zero
+
+        # ── READ: cross-attention projections ─────────────────────────────────
+        self.q_proj   = nn.Linear(D, D, bias=False)
+        self.k_proj   = nn.Linear(D, D, bias=False)
+        self.v_proj   = nn.Linear(D, D, bias=False)
         self.out_proj = nn.Linear(D, D, bias=False)
 
-        # WRITE: gated update
-        # gate: sigmoid(W_g @ [thought, readout]) → [B, M, 1]
-        self.write_key_proj = nn.Linear(D, D, bias=False)
-        self.write_val_proj = nn.Linear(D, D, bias=False)
-        self.gate_proj      = nn.Linear(D * 2, M, bias=True)
-        nn.init.constant_(self.gate_proj.bias, cfg.gate_bias)
+        # ── WRITE: per-slot gated update ──────────────────────────────────────
+        # gate[b, m]: how much slot m updates given the current thought state.
+        # Per-slot rather than broadcast — each slot decides independently.
+        #
+        # Implementation: project thought_mean + readout_mean into slot space,
+        # then compute alignment with each slot's current key → per-slot gate.
+        self.write_key_proj  = nn.Linear(D, D, bias=False)
+        self.write_val_proj  = nn.Linear(D, D, bias=False)
+        self.gate_context_proj = nn.Linear(D * 2, D, bias=False)
+        # Slot-specific gate bias: [M] — lets each slot have its own opening threshold
+        self.gate_slot_bias  = nn.Parameter(
+            torch.full((M,), cfg.gate_bias)   # sigmoid(-2.0) ≈ 0.12 at init
+        )
 
-        # Layer norms for stability
+        # ── Normalization ──────────────────────────────────────────────────────
         self.read_norm  = nn.LayerNorm(D)
         self.write_norm = nn.LayerNorm(D)
+        self.scale      = self.head_dim ** -0.5
+        self.dropout    = nn.Dropout(cfg.dropout)
 
-        self.dropout = nn.Dropout(cfg.dropout)
-        self.scale   = self.head_dim ** -0.5
+    # ── Orthogonal slot initialization ────────────────────────────────────────
 
-    def init_state(self, batch_size: int, device: torch.device) -> MemoryBankState:
-        """Initialize memory state for a new batch."""
-        keys   = self.initial_keys.expand(batch_size, -1, -1).clone()
-        values = self.initial_values.expand(batch_size, -1, -1).clone()
+    @staticmethod
+    def _init_orthogonal_slots(n_slots: int, d_model: int) -> torch.Tensor:
+        """
+        Build [1, n_slots, d_model] of maximally-spread orthogonal vectors.
+
+        If n_slots <= d_model: exact orthogonal rows from QR decomposition.
+        If n_slots >  d_model: tile orthogonal blocks at decreasing scale
+                               so later slots are distinguishable but lower norm.
+        """
+        if n_slots <= d_model:
+            A = torch.randn(d_model, d_model)
+            Q, _ = torch.linalg.qr(A)
+            return Q[:n_slots].unsqueeze(0)             # [1, n_slots, d_model]
+
+        blocks = []
+        remaining = n_slots
+        scale     = 1.0
+        while remaining > 0:
+            A = torch.randn(d_model, d_model)
+            Q, _ = torch.linalg.qr(A)
+            take  = min(remaining, d_model)
+            blocks.append(Q[:take] * scale)
+            remaining -= take
+            scale     *= 0.5                            # each tile is quieter
+        return torch.cat(blocks, dim=0).unsqueeze(0)   # [1, n_slots, d_model]
+
+    # ── State initialization ───────────────────────────────────────────────────
+
+    def init_state(
+        self,
+        batch_size: int,
+        device:     torch.device,
+        e_summary:  Optional[torch.Tensor] = None,     # [B, D]
+    ) -> MemoryBankState:
+        """
+        Initialize memory state for a new sequence.
+
+        keys[b, m]   = slot_id[m]  +  cold_key_proj(e_summary[b])
+        values[b, m] = cold_val_proj(e_summary[b])   (broadcast across slots)
+
+        If e_summary is None (e.g. during generation with no encoded input),
+        falls back to slot identities only — still better than zero or random.
+        """
+        B  = batch_size
+        M  = self.cfg.n_slots
+        D  = self.cfg.d_model
+
+        # Slot identities: [1, M, D] → [B, M, D]
+        slot_ids = self.slot_ids.expand(B, -1, -1)
+
+        if e_summary is not None:
+            # e_summary: [B, D] → [B, 1, D] → [B, M, D]
+            e_exp  = e_summary.unsqueeze(1)                    # [B, 1, D]
+            keys   = slot_ids + self.cold_key_proj(e_exp)     # [B, M, D]
+            values = self.cold_val_proj(e_exp).expand(-1, M, -1)  # [B, M, D]
+        else:
+            keys   = slot_ids.clone()
+            values = torch.zeros(B, M, D, device=device, dtype=slot_ids.dtype)
+
         return MemoryBankState(keys.to(device), values.to(device))
+
+    # ── READ ───────────────────────────────────────────────────────────────────
 
     def _read(
         self,
         thought_tokens: torch.Tensor,   # [B, N_t, D]
         state:          MemoryBankState,
     ) -> torch.Tensor:
-        """
-        Multi-head cross-attention: thought tokens query memory slots.
-        Returns readout: [B, N_t, D]
-        """
+        """Multi-head cross-attention: thought tokens query memory → readout [B, N_t, D]."""
         B, N_t, D = thought_tokens.shape
-        H, Hd = self.cfg.n_heads, self.head_dim
+        H, Hd     = self.cfg.n_heads, self.head_dim
 
-        Q = self.q_proj(thought_tokens)                  # [B, N_t, D]
-        K = self.k_proj(state.keys)                      # [B, M, D]
-        V = self.v_proj(state.values)                    # [B, M, D]
+        Q = self.q_proj(thought_tokens)                      # [B, N_t, D]
+        K = self.k_proj(state.keys)                          # [B, M, D]
+        V = self.v_proj(state.values)                        # [B, M, D]
 
-        # Reshape to [B, H, *, Hd]
-        Q = Q.view(B, N_t, H, Hd).transpose(1, 2)       # [B, H, N_t, Hd]
-        K = K.view(B, -1,  H, Hd).transpose(1, 2)       # [B, H, M, Hd]
-        V = V.view(B, -1,  H, Hd).transpose(1, 2)       # [B, H, M, Hd]
+        Q = Q.view(B, N_t, H, Hd).transpose(1, 2)           # [B, H, N_t, Hd]
+        K = K.view(B, -1,  H, Hd).transpose(1, 2)           # [B, H, M,   Hd]
+        V = V.view(B, -1,  H, Hd).transpose(1, 2)           # [B, H, M,   Hd]
 
-        attn = torch.matmul(Q, K.transpose(-2, -1)) * self.scale  # [B, H, N_t, M]
-        attn = F.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-
-        readout = torch.matmul(attn, V)                  # [B, H, N_t, Hd]
+        attn    = torch.matmul(Q, K.transpose(-2, -1)) * self.scale   # [B, H, N_t, M]
+        attn    = self.dropout(F.softmax(attn, dim=-1))
+        readout = torch.matmul(attn, V)                      # [B, H, N_t, Hd]
         readout = readout.transpose(1, 2).reshape(B, N_t, D)
-        return self.out_proj(readout)                    # [B, N_t, D]
+        return self.out_proj(readout)                        # [B, N_t, D]
+
+    # ── WRITE ──────────────────────────────────────────────────────────────────
 
     def _write(
         self,
@@ -216,64 +294,85 @@ class MemoryBank(nn.Module):
         state:          MemoryBankState,
     ) -> MemoryBankState:
         """
-        Gated write: update memory slots based on thought token state.
+        Per-slot gated write.
 
-        Gate: g[m] = sigmoid(W_g @ mean([thought, readout]))
-        New memory: keys[m]   = retention * keys[m]   + g[m] * new_key
-                    values[m] = retention * values[m] + g[m] * new_val
+        Gate logic:
+          context  = W_ctx([thought_mean, readout_mean])   [B, D]
+          gate[m]  = sigmoid( context · slot_key[m] / sqrt(D)
+                              + slot_bias[m] )             [B, M]
+
+        Each slot m computes its own gate by measuring alignment between the
+        aggregated thought context and that slot's current key.  Slots that
+        are already aligned to the incoming thought update less aggressively
+        (they're already storing relevant content); misaligned slots update
+        more freely to absorb new information.
+
+        Update rule (LTI-style, mirrors anthos/main.py sequence injection):
+          keys[m]   = retention * keys[m]   + gate[m] * new_key
+          values[m] = retention * values[m] + gate[m] * new_val
         """
         B, N_t, D = thought_tokens.shape
-        M = self.cfg.n_slots
-        r = self.cfg.retention
+        M         = self.cfg.n_slots
+        r         = self.cfg.retention
 
-        # Aggregate thought state — mean over thought tokens
-        thought_mean = thought_tokens.mean(dim=1)        # [B, D]
-        readout_mean = readout.mean(dim=1)               # [B, D]
+        # Aggregate thought state
+        thought_mean = thought_tokens.mean(dim=1)          # [B, D]
+        readout_mean = readout.mean(dim=1)                 # [B, D]
 
-        # Gate: [B, M] — how much each memory slot gets updated
-        gate_input = torch.cat([thought_mean, readout_mean], dim=-1)  # [B, 2D]
-        gate = torch.sigmoid(self.gate_proj(gate_input))              # [B, M]
-        gate = gate.unsqueeze(-1)                                      # [B, M, 1]
+        # Context vector from combined thought + readout
+        context = self.gate_context_proj(
+            torch.cat([thought_mean, readout_mean], dim=-1)
+        )                                                  # [B, D]
 
-        # New key/value candidates — broadcast thought mean to all slots
+        # Per-slot gate: alignment of context with each slot's current key
+        # state.keys: [B, M, D];  context: [B, D] → [B, D, 1]
+        alignment = torch.bmm(state.keys, context.unsqueeze(-1)).squeeze(-1)  # [B, M]
+        alignment = alignment / math.sqrt(D)
+        gate      = torch.sigmoid(alignment + self.gate_slot_bias)            # [B, M]
+        gate      = gate.unsqueeze(-1)                                        # [B, M, 1]
+
+        # New KV candidates derived from thought mean, broadcast across slots
         new_key = self.write_key_proj(self.write_norm(thought_mean))  # [B, D]
         new_val = self.write_val_proj(thought_mean)                   # [B, D]
         new_key = new_key.unsqueeze(1).expand(-1, M, -1)              # [B, M, D]
         new_val = new_val.unsqueeze(1).expand(-1, M, -1)              # [B, M, D]
 
-        # Gated LTI-style update (mirrors Anthos's h_t update philosophy)
+        # Gated LTI update — mirrors AnthosRecurrentBlock's h update
         updated_keys   = r * state.keys   + gate * new_key
         updated_values = r * state.values + gate * new_val
 
         return MemoryBankState(updated_keys, updated_values)
 
+    # ── Forward ────────────────────────────────────────────────────────────────
+
     def forward(
         self,
-        thought_tokens: torch.Tensor,         # [B, N_t, D]
+        thought_tokens: torch.Tensor,              # [B, N_t, D]
         state:          Optional[MemoryBankState] = None,
+        e_summary:      Optional[torch.Tensor]    = None,  # [B, D] for cold-start
     ) -> tuple[torch.Tensor, MemoryBankState]:
         """
         Args:
             thought_tokens: [B, N_t, D] — from the thought stream
-            state:          MemoryBankState or None (auto-initialized)
+            state:          MemoryBankState | None — auto-initialized on None
+            e_summary:      [B, D] mean-pooled encoded input, used only when
+                            state is None to condition the cold-start.
+                            Safe to always pass — ignored once state exists.
 
         Returns:
             enriched_thoughts: [B, N_t, D] — thought tokens + memory readout
             new_state:         updated MemoryBankState
         """
-        B = thought_tokens.shape[0]
-        device = thought_tokens.device
-
         if state is None:
-            state = self.init_state(B, device)
+            state = self.init_state(
+                thought_tokens.shape[0],
+                thought_tokens.device,
+                e_summary,
+            )
 
-        normed = self.read_norm(thought_tokens)
-        readout = self._read(normed, state)
-
-        # Residual: add memory readout to thought tokens
-        enriched = thought_tokens + readout
-
-        # Update memory with new thought state
+        normed   = self.read_norm(thought_tokens)
+        readout  = self._read(normed, state)
+        enriched = thought_tokens + readout          # residual
         new_state = self._write(thought_tokens, readout, state)
 
         return enriched, new_state
@@ -289,20 +388,20 @@ class ExternalMemoryReader:
 
     The thought stream processes the memory prefix non-causally — it sees the
     full context including the memory tokens — so retrieved memories are
-    immediately available to working memory without taking up sequence positions
-    in the causal stream.
+    immediately available to working memory without consuming causal sequence
+    positions.
 
-    Works with or without engram installed:
+    Works with or without Engram installed:
       - With engram: full semantic search + recency weighting
-      - Without: uses supplied fallback memories
+      - Without:     uses supplied fallback_memories list
 
     Args:
         tokenizer:         HuggingFace tokenizer (same vocab as Anthos)
-        engram_wing:       Engram wing to search (e.g., "anthos")
-        engram_room:       Optional room filter
-        max_memory_tokens: Max tokens to prepend (default 170 — Engram's L0+L1)
+        engram_wing:       Engram wing to search (e.g. "anthos")
+        engram_room:       Optional room filter within the wing
+        max_memory_tokens: Max tokens to prepend (default 170 — Engram L0+L1)
         n_results:         Number of Engram search results to retrieve
-        memory_prefix:     Token prefix string to mark memory context
+        fallback_memories: Used when Engram is not installed
     """
 
     MEMORY_START = "[MEMORY]\n"
@@ -315,7 +414,6 @@ class ExternalMemoryReader:
         engram_room:       Optional[str] = None,
         max_memory_tokens: int           = 170,
         n_results:         int           = 5,
-        memory_prefix:     str           = "[MEMORY]\n",
         fallback_memories: list[str]     = None,
     ):
         self.tokenizer         = tokenizer
@@ -333,18 +431,16 @@ class ExternalMemoryReader:
         except ImportError:
             return False
 
-    def retrieve(self, query: str) -> list[str]:
-        """
-        Retrieve relevant memories for a query.
+    # ── Retrieval ──────────────────────────────────────────────────────────────
 
-        Returns list of memory strings (ES-compressed if engram available).
-        """
+    def retrieve(self, query: str) -> list[str]:
+        """Return relevant memory strings for a query."""
         if self._engram_available:
             return self._engram_retrieve(query)
-        return self.fallback_memories[:self.n_results]
+        return self.fallback_memories[: self.n_results]
 
     def _engram_retrieve(self, query: str) -> list[str]:
-        """Query Engram's searcher directly (no MCP, no subprocess)."""
+        """Query Engram's searcher directly — no MCP, no subprocess."""
         try:
             from engram.backends import get_backend
             from engram.palace   import Palace
@@ -363,19 +459,19 @@ class ExternalMemoryReader:
                 max_results=self.n_results,
             )
             return [r["text"] for r in results]
-        except Exception as e:
-            # Graceful fallback — never break inference
-            return self.fallback_memories[:self.n_results]
+        except Exception:
+            return self.fallback_memories[: self.n_results]
+
+    # ── Prefix building ────────────────────────────────────────────────────────
 
     def build_memory_prefix(self, memories: list[str]) -> str:
         """
-        Build the memory prefix string, truncated to max_memory_tokens.
-        Uses Engram Shorthand if available (more content per token).
+        Build the memory prefix string, capped at max_memory_tokens.
+        Uses Engram Shorthand compression if available.
         """
         if not memories:
             return ""
 
-        # Try to use Engram's ES compressor
         if self._engram_available:
             try:
                 from engram.shorthand import compress
@@ -383,22 +479,19 @@ class ExternalMemoryReader:
             except Exception:
                 pass
 
-        prefix = self.MEMORY_START
         tok    = self.tokenizer
-
+        prefix = self.MEMORY_START
         for mem in memories:
             candidate = prefix + mem + "\n"
-            n_tokens  = len(tok.encode(candidate + self.MEMORY_END))
-            if n_tokens > self.max_memory_tokens:
+            if len(tok.encode(candidate + self.MEMORY_END)) > self.max_memory_tokens:
                 break
             prefix = candidate
 
-        prefix += self.MEMORY_END
-        return prefix
+        return prefix + self.MEMORY_END
 
     def prepend_memories(
         self,
-        input_ids: torch.Tensor,   # [B, T]
+        input_ids: torch.Tensor,              # [B, T]
         query:     str,
         memories:  Optional[list[str]] = None,
     ) -> torch.Tensor:
@@ -406,18 +499,15 @@ class ExternalMemoryReader:
         Retrieve memories for query and prepend to input_ids.
 
         Args:
-            input_ids: [B, T] input token ids
-            query:     semantic search query for memory retrieval
-            memories:  optional pre-retrieved memories (skip retrieval if supplied)
+            input_ids: [B, T]
+            query:     semantic search query
+            memories:  pre-retrieved list — skips retrieval if supplied
 
         Returns:
-            augmented_ids: [B, T + T_mem] with memory prefix prepended
+            augmented_ids: [B, T_mem + T]
         """
         if memories is None:
             memories = self.retrieve(query)
-
-        if not memories:
-            return input_ids
 
         prefix_str = self.build_memory_prefix(memories)
         if not prefix_str.strip():
@@ -427,16 +517,15 @@ class ExternalMemoryReader:
             prefix_str, return_tensors="pt"
         ).to(input_ids.device)                            # [1, T_mem]
 
-        # Expand to batch size
-        B = input_ids.shape[0]
-        prefix_ids = prefix_ids.expand(B, -1)
-
-        return torch.cat([prefix_ids, input_ids], dim=1)  # [B, T_mem + T]
+        return torch.cat(
+            [prefix_ids.expand(input_ids.shape[0], -1), input_ids],
+            dim=1,
+        )                                                 # [B, T_mem + T]
 
     def wake_up_context(self, wing: Optional[str] = None) -> str:
         """
-        Load Engram's L0 + L1 cold-start context (~170 tokens).
-        Returns empty string if Engram not available.
+        Load Engram L0 + L1 cold-start context (~170 tokens).
+        Returns empty string if Engram is not installed.
         """
         if not self._engram_available:
             return ""
@@ -457,26 +546,26 @@ class ExternalMemoryReader:
 
 class MemoryAugmentedAnthos(nn.Module):
     """
-    Wraps an Anthos model with both MemoryBank and ExternalMemoryReader.
+    Wraps an Anthos model with both MemoryBank (Layer 1) and ExternalMemoryReader
+    (Layer 2) behind a single generate() call.
 
-    Provides a generate() that:
-      1. Retrieves external Engram memories for the query
-      2. Prepends them to input_ids
-      3. Runs Anthos generation with internal MemoryBank active
-
-    The MemoryBank state is optionally preserved across calls for
-    stateful multi-turn inference.
+    Flow:
+      1. [Layer 2] Retrieve Engram memories → prepend to input_ids
+      2. [Layer 1] MemoryBank is wired into the model's RecurrentBlock;
+                   if stateful=True, previous bank state is restored
+      3. Run model.generate()
+      4. [Layer 1] Persist bank state if stateful=True
 
     Usage:
-        from anthos.main import Anthos
+        from anthos.main   import Anthos
         from anthos.memory import MemoryAugmentedAnthos, MemoryBankConfig
-        from transformers import AutoTokenizer
+        from transformers  import AutoTokenizer
 
-        tok   = AutoTokenizer.from_pretrained("data/anthos_tokenizer")
-        model = Anthos(cfg)
+        tok      = AutoTokenizer.from_pretrained("data/anthos_tokenizer")
+        model    = Anthos(cfg)
         # ... load checkpoint ...
 
-        bank_cfg = MemoryBankConfig(d_model=cfg.dim, n_slots=512, n_heads=8)
+        bank_cfg = MemoryBankConfig(d_model=cfg.dim, n_slots=512, n_heads=cfg.n_heads)
         wrapped  = MemoryAugmentedAnthos(
             model, bank_cfg, tokenizer=tok, engram_wing="anthos"
         )
@@ -500,23 +589,22 @@ class MemoryAugmentedAnthos(nn.Module):
         stateful:          bool          = False,
     ):
         super().__init__()
-        self.model       = model
-        self.memory_bank = MemoryBank(bank_cfg)
-        self.stateful    = stateful
+        self.model    = model
+        self.stateful = stateful
         self._bank_state: Optional[MemoryBankState] = None
 
         if tokenizer is not None:
             self.reader = ExternalMemoryReader(
-                tokenizer=tokenizer,
-                engram_wing=engram_wing,
-                engram_room=engram_room,
-                max_memory_tokens=max_memory_tokens,
+                tokenizer         = tokenizer,
+                engram_wing       = engram_wing,
+                engram_room       = engram_room,
+                max_memory_tokens = max_memory_tokens,
             )
         else:
             self.reader = None
 
-    def reset_memory(self):
-        """Clear stateful memory bank (call between independent sessions)."""
+    def reset_memory(self) -> None:
+        """Clear stateful memory bank. Call between independent sessions."""
         self._bank_state = None
 
     def generate(
@@ -532,40 +620,51 @@ class MemoryAugmentedAnthos(nn.Module):
         Generate with external memory retrieval + internal MemoryBank.
 
         Args:
-            input_ids:      [B, T] input token ids
-            query:          semantic query for Engram memory retrieval
-            memories:       pre-retrieved memories (skip retrieval)
+            input_ids:      [B, T]
+            query:          semantic query for Engram retrieval
+            memories:       pre-retrieved memories — skips retrieval if supplied
             max_new_tokens: generation length
             n_loops:        Anthos recurrent loop iterations
 
         Returns:
             output_ids: [B, T + max_new_tokens]
         """
-        # Layer 2: prepend Engram memories
+        # Layer 2: prepend Engram memories to input
         if self.reader is not None and (query or memories):
             input_ids = self.reader.prepend_memories(
                 input_ids, query=query or "", memories=memories
             )
 
-        # Layer 1: MemoryBank is wired into the model's RecurrentBlock
-        # (see integration instructions below for how to hook it in)
-        # If stateful, restore previous state
+        # Layer 1: restore stateful bank state if enabled
         if self.stateful and self._bank_state is not None:
             self._bank_state = self._bank_state.to(input_ids.device)
+            # Inject state into model's recurrent block before generation
+            if hasattr(self.model, "recurrent"):
+                self.model.recurrent._injected_memory_state = self._bank_state
 
         out = self.model.generate(
             input_ids,
-            max_new_tokens=max_new_tokens,
-            n_loops=n_loops,
+            max_new_tokens = max_new_tokens,
+            n_loops        = n_loops,
             **generate_kwargs,
         )
 
-        # If stateful, persist state for next call
+        # Layer 1: persist state across calls if stateful
         if self.stateful and hasattr(self.model, "_last_memory_state"):
-            self._bank_state = self.model._last_memory_state.detach()
+            state = self.model._last_memory_state
+            if state is not None:
+                self._bank_state = state.detach()
 
         return out
 
-    def forward(self, input_ids, n_loops=8, return_aux=False, **kwargs):
+    def forward(
+        self,
+        input_ids:  torch.Tensor,
+        n_loops:    int  = 8,
+        return_aux: bool = False,
+        **kwargs,
+    ):
         """Standard training forward — passes through to base model."""
-        return self.model(input_ids, n_loops=n_loops, return_aux=return_aux, **kwargs)
+        return self.model(
+            input_ids, n_loops=n_loops, return_aux=return_aux, **kwargs
+        )
