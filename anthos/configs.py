@@ -420,3 +420,34 @@ def get_training_config(tier: str = "smoke"):
         )
 
     return model_cfg, train_cfg
+
+
+def get_model_config(variant: str) -> "AnthosConfig":
+    """
+    Return the AnthosConfig for a named production variant.
+
+    Variants
+    --------
+    anthos_1b   — dim=2048, experts=64,  thought_tokens=16, loop_iters=16, context=4k
+    anthos_3b   — dim=3072, experts=64,  thought_tokens=24, loop_iters=16, context=4k
+    anthos_10b  — dim=4096, experts=128, thought_tokens=32, loop_iters=24, context=8k
+    anthos_50b  — dim=6144, experts=256, thought_tokens=48, loop_iters=32, context=8k
+    anthos_100b — dim=8192, experts=256, thought_tokens=64, loop_iters=32, context=1M
+    """
+    from anthos.main import anthos_1b, anthos_3b, anthos_10b, anthos_50b, anthos_100b
+
+    _variants = {
+        "anthos_1b":   anthos_1b,
+        "anthos_3b":   anthos_3b,
+        "anthos_10b":  anthos_10b,
+        "anthos_50b":  anthos_50b,
+        "anthos_100b": anthos_100b,
+    }
+
+    if variant not in _variants:
+        raise ValueError(
+            f"Unknown variant '{variant}'. "
+            f"Choose from: {sorted(_variants.keys())}"
+        )
+
+    return _variants[variant]()

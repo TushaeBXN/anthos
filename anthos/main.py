@@ -73,7 +73,7 @@ class AnthosConfig:
     # Hidden dimension & heads
     dim:           int   = 2048
     n_heads:       int   = 16
-    n_kv_heads:    int   = 4          # GQA key/value heads
+    n_kv_heads:    int   = 8          # GQA key/value heads
     max_seq_len:   int   = 4096
 
     # Recurrence
@@ -101,13 +101,13 @@ class AnthosConfig:
     n_experts:         int   = 64
     n_shared_experts:  int   = 2
     n_experts_per_tok: int   = 4
-    expert_dim:        int   = 512
+    expert_dim:        int   = 2048
 
     # Adaptive Computation Time
     act_threshold:     float = 0.99
 
     # RoPE
-    rope_theta:        float = 500000.0
+    rope_theta:        float = 10000.0
 
     # Depth-wise LoRA rank
     lora_rank:         int   = 16
@@ -714,9 +714,13 @@ class Anthos(nn.Module):
         self.thought_pool = ThoughtTokenPool(cfg.n_thought_tokens, cfg.dim)
 
         # Separate RoPE freq tables for GQA (full head_dim) and MLA (rope_head_dim)
-        freqs = precompute_rope_freqs(cfg.dim // cfg.n_heads, cfg.max_seq_len, cfg.rope_theta)
+        # Cap precomputed RoPE table at 131 072 tokens to avoid OOM for
+        # configs with max_seq_len=1_000_000 (anthos_100b).  Longer contexts
+        # are handled at runtime by _get_rope_freqs() via NTK dynamic scaling.
+        _precompute_len = min(cfg.max_seq_len, 131_072)
+        freqs = precompute_rope_freqs(cfg.dim // cfg.n_heads, _precompute_len, cfg.rope_theta)
         self.register_buffer("freqs_cis", freqs)
-        freqs_mla = precompute_rope_freqs(cfg.qk_rope_head_dim, cfg.max_seq_len, cfg.rope_theta)
+        freqs_mla = precompute_rope_freqs(cfg.qk_rope_head_dim, _precompute_len, cfg.rope_theta)
         self.register_buffer("freqs_cis_mla", freqs_mla)
 
         self.prelude = nn.ModuleList(
@@ -742,6 +746,30 @@ class Anthos(nn.Module):
         # Restore LoRA-specific inits that _init_weights would overwrite
         nn.init.kaiming_uniform_(self.recurrent.lora.B)
         nn.init.ones_(self.recurrent.lora.scale.weight)
+
+    def _get_rope_freqs(self, seq_len: int, use_mla: bool = False) -> torch.Tensor:
+        """
+        Return RoPE complex-exponential frequencies for seq_len positions.
+
+        If seq_len fits within the precomputed buffer, we return a slice.
+        If seq_len exceeds the buffer (long-context inference), we apply
+        NTK dynamic scaling: theta is increased so that the model's rotary
+        basis covers the full requested length without aliasing.
+
+        Formula (NTK-aware):
+            theta_scaled = theta * (seq_len / base_len) ^ (head_dim / (head_dim - 2))
+        """
+        buf = self.freqs_cis_mla if use_mla else self.freqs_cis
+        base_len = buf.shape[0]
+
+        if seq_len <= base_len:
+            return buf[:seq_len]
+
+        # Dynamic NTK scaling for contexts beyond the precomputed window
+        head_dim = self.cfg.qk_rope_head_dim if use_mla else (self.cfg.dim // self.cfg.n_heads)
+        scale    = seq_len / base_len
+        theta    = self.cfg.rope_theta * (scale ** (head_dim / (head_dim - 2)))
+        return precompute_rope_freqs(head_dim, seq_len, theta).to(buf.device)
 
     @staticmethod
     def _causal_mask(seq_len: int, device: torch.device) -> torch.Tensor:
@@ -772,9 +800,7 @@ class Anthos(nn.Module):
 
         x = self.embed(input_ids)                          # (B, T, dim)
 
-        freqs_cis = (
-            self.freqs_cis_mla if self.cfg.attn_type == "mla" else self.freqs_cis
-        )[:T]
+        freqs_cis = self._get_rope_freqs(T, use_mla=(self.cfg.attn_type == "mla"))
 
         # Standard causal mask for prelude/coda (no thought tokens)
         std_mask = self._causal_mask(T, device) if T > 1 else None
@@ -856,4 +882,4 @@ def anthos_1b()   -> AnthosConfig: return _base(dict(dim=2048, n_heads=16, n_exp
 def anthos_3b()   -> AnthosConfig: return _base(dict(dim=3072, n_heads=24, n_experts=64,  expert_dim=4096, max_loop_iters=16, max_seq_len=4096,   vocab_size=32000, n_thought_tokens=24))
 def anthos_10b()  -> AnthosConfig: return _base(dict(dim=4096, n_heads=32, n_experts=128, expert_dim=5632, max_loop_iters=24, max_seq_len=8192,   vocab_size=32000, n_thought_tokens=32))
 def anthos_50b()  -> AnthosConfig: return _base(dict(dim=6144, n_heads=48, n_experts=256, expert_dim=9728, max_loop_iters=32, max_seq_len=8192,   vocab_size=32000, n_thought_tokens=48))
-def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568,max_loop_iters=32, max_seq_len=131072, vocab_size=32000, n_thought_tokens=64))
+def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568,max_loop_iters=32, max_seq_len=1_000_000, vocab_size=32000, n_thought_tokens=64))

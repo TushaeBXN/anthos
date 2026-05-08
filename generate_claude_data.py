@@ -19,7 +19,9 @@ import json
 import time
 import random
 import argparse
+import threading
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
@@ -254,34 +256,47 @@ def main():
     generated  = 0
     failed     = 0
     t0         = time.time()
+    write_lock = threading.Lock()
+    stop_flag  = threading.Event()
+
+    workers = 3  # up to 8 concurrent requests
+
+    def task(topic):
+        if stop_flag.is_set():
+            return None
+        return generate_example(client, topic, tracker)
 
     with open(out, write_mode, encoding="utf-8") as f:
-        for i, topic in enumerate(topic_pool):
-            if args.budget and tracker.cost_usd >= args.budget:
-                print(f"\n  💰 Budget ${args.budget:.2f} reached — stopping early.")
-                break
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(task, topic): topic for topic in topic_pool}
+            for future in as_completed(futures):
+                if stop_flag.is_set():
+                    break
+                if args.budget and tracker.cost_usd >= args.budget:
+                    print(f"\n  💰 Budget ${args.budget:.2f} reached — stopping early.")
+                    stop_flag.set()
+                    break
 
-            example = generate_example(client, topic, tracker)
-            if example is None:
-                failed += 1
-                continue
+                example = future.result()
+                if example is None:
+                    with write_lock:
+                        failed += 1
+                    continue
 
-            f.write(json.dumps(example, ensure_ascii=False) + "\n")
-            f.flush()
-            generated += 1
-
-            if generated % 50 == 0 or generated == 1:
-                elapsed  = time.time() - t0
-                rate     = generated / elapsed if elapsed > 0 else 0
-                eta_secs = (remaining - generated) / rate if rate > 0 else 0
-                eta_min  = eta_secs / 60
-                print(
-                    f"  [{generated:4d}/{remaining}]  {tracker.report()}  "
-                    f"ETA {eta_min:.1f}m",
-                    flush=True,
-                )
-
-            time.sleep(args.delay)
+                with write_lock:
+                    f.write(json.dumps(example, ensure_ascii=False) + "\n")
+                    f.flush()
+                    generated += 1
+                    if generated % 50 == 0 or generated == 1:
+                        elapsed  = time.time() - t0
+                        rate     = generated / elapsed if elapsed > 0 else 0
+                        eta_secs = (remaining - generated) / rate if rate > 0 else 0
+                        eta_min  = eta_secs / 60
+                        print(
+                            f"  [{generated:4d}/{remaining}]  {tracker.report()}  "
+                            f"ETA {eta_min:.1f}m",
+                            flush=True,
+                        )
 
     total_written = already_done + generated
     print(f"\n{'─'*60}")
