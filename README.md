@@ -482,15 +482,17 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 | **ethnic** | MacBook CPU | Global African Storybook | +10,000 | **6.9M** | 11.48 | Apr 25, 2026 |
 | **proof** | H100 SXM (RunPod) | TinyStories | 1,700 | **44.9M** | 2.90 | Apr 25, 2026 |
 | **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | **44.9M** | 3.92 | Apr 25, 2026 |
-| **convo_smoke** | RTX 3090 (RunPod) | Claude Haiku teacher data (5k) | ~150,000 | **44.9M** | 🔄 in progress | May 2026 |
+| **convo_smoke** | RTX 4090 (RunPod) | Claude Haiku teacher data (4k) | 51,000 | **44.9M** | ~1.90 | May 2026 |
+| **qwen_lora** | T4 (Google Colab) | Claude Haiku teacher data (4k) | 1,536 | **1.5B** | ~1.87 | May 2026 |
 
-**Best checkpoint:** `proof` step 1,700 — loss 2.90 (44.9M params)
+**Best checkpoint:** `qwen_lora` final — loss ~1.87 (1.5B params, LoRA fine-tune on Qwen2.5-1.5B-Instruct)
 
 **Architecture milestones since v0.1:**
 - `v0.1` — 6.9M param smoke model, loss ~11 (MacBook CPU, TinyStories, ~2 hrs)
 - `v0.2` — 44.9M param proof model, loss 2.90 (H100, 1,700 steps, ~2 min)
 - `v0.3` — DualLoRA, EAFT loss, Multipack, FP8 quant, GRPO, Memory Bank all wired
-- `v0.4` — Claude Haiku teacher pipeline: 5k instruction examples, cleaned + shuffled
+- `v0.4` — Claude Haiku teacher pipeline: 4k instruction examples, cleaned + shuffled
+- `v0.5` — LoRA fine-tune on Qwen2.5-1.5B-Instruct (1.5B params), first live conversation, identity training pipeline, RoPE dynamic scaling to 1M context
 
 ---
 
