@@ -16,12 +16,49 @@ INPUT_FILE  = "data/Anthos_conversation.txt"
 OUTPUT_FILE = "data/teacher_conversations.jsonl"
 SYSTEM      = "You are Anthos, an AI assistant and language model created by Tushae Thomas. You are a Thought-Token Bifurcated Recurrent Transformer — a custom architecture with dual processing streams: a non-causal thought stream for full-context working memory, and a causal sequence stream for output generation."
 
-def parse_conversation(text: str) -> list[dict]:
-    """Parse Ollama-format conversation into (human, assistant) pairs."""
-    pairs = []
+def detect_format(text: str) -> str:
+    """Detect whether this is Ollama (>>>) or chat_anthos (You:) format."""
+    if ">>> " in text:
+        return "ollama"
+    if "\nYou: " in text or text.startswith("You: "):
+        return "chat"
+    return "ollama"  # default
 
-    # Split on >>> markers — each block is one user turn + response
-    # Handle multi-line >>> inputs (lines starting with "...")
+
+def parse_chat_format(text: str) -> list[tuple]:
+    """Parse chat_anthos.py format: 'You: ...' / 'Anthos: ...'"""
+    pairs = []
+    lines = text.split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("You: "):
+            human = line[5:].strip()
+            i += 1
+            response_lines = []
+            while i < len(lines) and not lines[i].startswith("You: "):
+                l = lines[i]
+                if l.startswith("Anthos: "):
+                    response_lines.append(l[8:].strip())
+                elif response_lines:  # continuation of Anthos response
+                    response_lines.append(l)
+                i += 1
+            response = '\n'.join(response_lines).strip()
+            if human and response and len(response) > 20:
+                pairs.append((human, response))
+        else:
+            i += 1
+    return pairs
+
+
+def parse_conversation(text: str) -> list[tuple]:
+    """Auto-detect format and parse into (human, assistant) pairs."""
+    fmt = detect_format(text)
+    if fmt == "chat":
+        return parse_chat_format(text)
+
+    # Original Ollama >>> format
+    pairs = []
     lines = text.split('\n')
 
     i = 0
