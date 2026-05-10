@@ -45,3 +45,15 @@ Thumbs.db
 # Logs
 *.log
 wandb/
+
+# Raw downloaded data
+raw_stories/
+data/raw_manuals/
+
+# Temp/duplicate files
+smoke-test-results.png
+data/*.save
+data/anthos_tokenizer/
+
+# Claude Code settings
+.claude/
