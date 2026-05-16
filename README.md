@@ -1,12 +1,13 @@
 <div align="center">
-<a href="https://ibb.co/6JtCgPJ1"><img src="https://i.ibb.co/BK6MqZKr/Anthos.jpg" alt="Anthos" border="0"></a>
+  <img src="assets/anthos-logo.jpg" alt="Anthos — Think in Streams" width="480"/>
 
   <h1>Anthos</h1>
   <p><strong>Think in Streams.</strong></p>
+  <p><em>Built by <a href="https://github.com/TushaeBXN">Tushae Thomas</a> · 2026</em></p>
 
   [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
-  [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
+  [![License](https://img.shields.io/badge/License-CC_BY--NC_4.0-green?style=for-the-badge)](LICENSE)
   [![Architecture](https://img.shields.io/badge/Architecture-Bifurcated_Recurrent_Transformer-5B9BD5?style=for-the-badge)](docs/architecture.md)
   [![Tests](https://img.shields.io/badge/Tests-18%2F18_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/test_anthos.py)
 
@@ -467,32 +468,64 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 
 ---
 
+## In Anthos's Own Words
+
+> *"I am Anthos, a thought-token model designed by Tushae Thomas using a PyTorch architecture with parallel processing streams: the Thought Stream and Sequence Stream. The Thought Stream is non-causal but sees the entire context while acting as explicit working memory — internal scratch-pad vectors that leave no output trace. The other stream carries content to produce outputs, blending a Mixture-of-Experts FFN with Adaptive Computation Time halting and Dual LoRA adapters. I am equipped with 512 slots in my persistent memory bank — an advanced feature designed specifically by Tushae Thomas."*
+
+---
+
 ## Project Status
 
 <div align="center">
   <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
-  <p><em>5 training runs across CPU and H100 GPU. 44.9M parameter proof model reached loss 2.90 in under 2 minutes on H100. Teacher data pipeline live — 5,000 Claude-generated instruction examples queued for fine-tuning.</em></p>
+  <p><em>Training runs across CPU and H100 GPU. 44.9M parameter proof model reached loss 2.90 in under 2 minutes on H100. Teacher data pipeline live — 5,000 Claude-generated instruction examples queued for fine-tuning.</em></p>
 </div>
 
 ### Training History
 
-| Run | Hardware | Dataset | Steps | Params | Final Loss | Date |
+| Run | Hardware | Dataset | Steps | Params | Notes | Date |
 |---|---|---|---|---|---|---|
-| **smoke** | MacBook CPU | TinyStories | 10,000 | **6.9M** | 10.99 | Apr 23, 2026 |
-| **ethnic** | MacBook CPU | Global African Storybook | +10,000 | **6.9M** | 11.48 | Apr 25, 2026 |
-| **proof** | H100 SXM (RunPod) | TinyStories | 1,700 | **44.9M** | 2.90 | Apr 25, 2026 |
-| **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | **44.9M** | 3.92 | Apr 25, 2026 |
-| **convo_smoke** | RTX 4090 (RunPod) | Claude Haiku teacher data (4k) | 51,000 | **44.9M** | ~1.90 | May 2026 |
-| **qwen_lora** | T4 (Google Colab) | Claude Haiku teacher data (4k) | 1,536 | **1.5B** | ~1.87 | May 2026 |
+| **first test** | MacBook CPU | TinyStories | 2,000 | **6.9M** | 8 thought tokens · 8 loops · first ever run | Apr 22, 2026 |
+| **smoke v2** | MacBook CPU | TinyStories | 10,000 | **6.9M** | Upgraded to 16 loops · coherent short text emerging | Apr 22, 2026 |
+| **smoke** | MacBook CPU | TinyStories | 10,000 | **6.9M** | loss 10.99 · architecture confirmed learning | Apr 23, 2026 |
+| **ethnic** | MacBook CPU | Global African Storybook | +10,000 | **6.9M** | loss 11.48 · cultural domain fine-tune | Apr 25, 2026 |
+| **proof** | H100 SXM (RunPod) | TinyStories | 1,700 | **44.9M** | loss 2.90 · readable stories · ~2 min | Apr 25, 2026 |
+| **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | **44.9M** | loss 3.92 · first conversation fine-tune | Apr 25, 2026 |
+| **convo_smoke** | RTX 4090 (RunPod) | Claude Haiku teacher data (4k) | 51,000 | **44.9M** | loss ~1.90 · instruction following | May 2026 |
+| **qwen_lora** | T4 (Google Colab) | Claude Haiku teacher data (4k) | 1,536 | **1.5B** | loss ~1.87 · first live conversation | May 2026 |
 
 **Best checkpoint:** `qwen_lora` final — loss ~1.87 (1.5B params, LoRA fine-tune on Qwen2.5-1.5B-Instruct)
 
-**Architecture milestones since v0.1:**
-- `v0.1` — 6.9M param smoke model, loss ~11 (MacBook CPU, TinyStories, ~2 hrs)
+### First Test Run — April 22, 2026
+
+The very first Anthos run. MacBook CPU, smoke tier, 6,961,571 parameters, 8 thought tokens, 8 loops, TinyStories:
+
+```
+Early output (step ~100):
+  "Once upon a time, the tree was very happy. He is it was very happy and
+   said, 'That are it was excited to take a time, there, I you.'"
+
+Mid-training output (step ~1,000):
+  "Once upon a time, there was a little girl. She had a girl named Timmy's
+   mom saw a little girl named Lily who looked at a little girl named
+   Lily's mommy loved to find a little girl named Lily..."
+
+Step 2,000 — training complete:
+  "One day so excited to share, a little... The small robot looked at the
+   man's very excited and thanked his parents found a good friends..."
+  ✓ Saved checkpoint → checkpoints/anthos-smoke/step_002000.pt
+  ✓ Saved checkpoint → checkpoints/anthos-smoke/final.pt
+```
+
+Loss dropped and sentence structure emerged within 2,000 steps on CPU — architecture confirmed working.
+
+**Architecture milestones:**
+- `v0.1` — 6.9M param smoke model, loss ~11 (MacBook CPU, TinyStories, first test Apr 22)
 - `v0.2` — 44.9M param proof model, loss 2.90 (H100, 1,700 steps, ~2 min)
 - `v0.3` — DualLoRA, EAFT loss, Multipack, FP8 quant, GRPO, Memory Bank all wired
 - `v0.4` — Claude Haiku teacher pipeline: 4k instruction examples, cleaned + shuffled
 - `v0.5` — LoRA fine-tune on Qwen2.5-1.5B-Instruct (1.5B params), first live conversation, identity training pipeline, RoPE dynamic scaling to 1M context
+- `v0.6` — Identity hardening, scalable growth (1B→100B), lifelong learning, self-improvement, distributed training, knowledge graph, benchmarking, model surgery, deployment, autonomous improvement agent
 
 ---
 
@@ -531,6 +564,53 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 | [`anthos/quant.py`](anthos/quant.py) | FP8 inference quantization |
 | [`anthos/serve.py`](anthos/serve.py) | RunPod serverless worker (OpenAI-compatible) |
 | [`anthos/train_additions.py`](anthos/train_additions.py) | Drop-in training integration shim |
+| [`anthos/identity_hardening.py`](anthos/identity_hardening.py) | Cryptographic identity locking — special tokens, dual loss head, checkpoint signing |
+| [`anthos/scalable_growth.py`](anthos/scalable_growth.py) | Zero-reconstruction growth — expand 1B → 3B → 10B → 100B with one method call |
+| [`train_anthos.py`](train_anthos.py) | Complete 3-phase training pipeline (Foundation → Identity Hardening → Instruction Tuning) |
+| [`anthos/lifelong_learning.py`](anthos/lifelong_learning.py) | Experience replay + Elastic Weight Consolidation — learn new things without forgetting old ones |
+| [`anthos/self_improvement.py`](anthos/self_improvement.py) | Self-distillation — model generates and trains on its own best outputs |
+| [`anthos/distributed_grid.py`](anthos/distributed_grid.py) | Multi-GPU distributed training coordinator (DDP) |
+| [`anthos/knowledge_graph.py`](anthos/knowledge_graph.py) | Persistent queryable knowledge graph that survives across sessions |
+| [`anthos/benchmark_suite.py`](anthos/benchmark_suite.py) | Auto-run GSM8K · MMLU · HumanEval · TruthfulQA after every checkpoint |
+| [`anthos/model_surgery.py`](anthos/model_surgery.py) | Prune dead experts · merge models · distill to smaller student — no retraining |
+| [`anthos/deploy.py`](anthos/deploy.py) | One-command deploy to HuggingFace · Ollama · RunPod |
+| [`anthos/autonomous_agent.py`](anthos/autonomous_agent.py) | Background loop that generates hypotheses, runs A/B experiments, and applies improvements |
+| [`anthos/community.py`](anthos/community.py) | Community fine-tune hub with identity verification + FedAvg federated learning |
+| [`anthos/self_destruct.py`](anthos/self_destruct.py) | Hardware fingerprinting and remote kill switch for model protection |
+
+---
+
+## Growth Roadmap
+
+Anthos is designed to scale from 1B to 100B parameters **without reconstruction** — trained weights carry forward at every stage.
+
+```python
+from anthos.scalable_growth import ScalableAnthos
+
+model = ScalableAnthos(cfg)         # start at 1B
+model.expand_to_size("3B")          # grow → all weights preserved
+model.expand_to_size("10B")         # grow again
+model.expand_to_size("100B")        # full scale
+```
+
+| Stage | Dim | Layers | Experts | Thought Tokens | Context | Hardware |
+|---|---|---|---|---|---|---|
+| **1B** (now) | 2048 | 24 | 64 | 16 | 4k | 1× H100 |
+| **3B** | 3072 | 26 | 96 | 24 | 4k | 1× H100 |
+| **10B** | 4096 | 32 | 128 | 32 | 8k | 8× H100 |
+| **50B** | 6144 | 40 | 256 | 48 | 8k | 64× H100 |
+| **100B** | 8192 | 48 | 256 | 64 | 1M | 64× H100 |
+
+### Identity Lock
+
+Anthos's identity — *created by Tushae Thomas (TushaeBXN), 2026* — is baked into the weights at four levels:
+
+1. **Special tokens** (IDs 32000–32007) prepended to every training example
+2. **Dual loss head** with 2× weight — forces identity output at every position
+3. **Frozen embeddings** — identity token rows locked after 5,000 steps
+4. **Cryptographic checkpoint signing** — tampered checkpoints refuse to load
+
+Removing the identity would require retraining from scratch. It is not a system prompt — it lives in the weights.
 
 ---
 
@@ -550,7 +630,7 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 
 ## License
 
-MIT License — Copyright (c) 2026 Tushae Thomas. See [LICENSE](LICENSE) for full text.
+CC BY-NC 4.0 — Copyright (c) 2026 Tushae Thomas. Non-commercial use only. See [LICENSE](LICENSE) for full text.
 
 ---
 

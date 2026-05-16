@@ -124,6 +124,26 @@ from anthos.kv_cache import (
     CachedGenerator,
 )
 
+from anthos.identity_hardening import (
+    AnthosWithIdentityLock,
+    CheckpointSigner,
+    IDENTITY_TOKEN_IDS,
+    IDENTITY_MAPPINGS,
+    REQUIRED_IDENTITY_SEQUENCE,
+    IdentityLossHead,
+)
+from anthos.scalable_growth import ScalableAnthos, RecurrentBlock, MoELayer
+from anthos.lifelong_learning import ExperienceReplayBuffer, ElasticWeightConsolidation, LifelongTrainer
+from anthos.self_improvement import SelfTeacher, IterativeRefinement
+from anthos.distributed_grid import DistributedGrid
+from anthos.knowledge_graph import AnthosKnowledgeGraph, GraphAugmentedGeneration
+from anthos.benchmark_suite import AnthosBenchmark, ContinuousBenchmarking
+from anthos.model_surgery import ModelSurgeon
+from anthos.deploy import AnthosDeployer
+from anthos.autonomous_agent import AutonomousImprovementAgent
+from anthos.community import CommunityModelHub, FederatedLearningCoordinator
+from anthos.self_destruct import ModelProtection
+
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"
 __all__ = [
@@ -215,4 +235,41 @@ __all__ = [
     "build_dataloader",
     "build_loss",
     "training_step",
+    # Identity hardening
+    "AnthosWithIdentityLock",
+    "CheckpointSigner",
+    "IDENTITY_TOKEN_IDS",
+    "IDENTITY_MAPPINGS",
+    "REQUIRED_IDENTITY_SEQUENCE",
+    "IdentityLossHead",
+    # Scalable growth
+    "ScalableAnthos",
+    "RecurrentBlock",
+    "MoELayer",
+    # Lifelong learning
+    "ExperienceReplayBuffer",
+    "ElasticWeightConsolidation",
+    "LifelongTrainer",
+    # Self-improvement
+    "SelfTeacher",
+    "IterativeRefinement",
+    # Distributed training
+    "DistributedGrid",
+    # Knowledge graph
+    "AnthosKnowledgeGraph",
+    "GraphAugmentedGeneration",
+    # Benchmarking
+    "AnthosBenchmark",
+    "ContinuousBenchmarking",
+    # Model surgery
+    "ModelSurgeon",
+    # Deployment
+    "AnthosDeployer",
+    # Autonomous agent
+    "AutonomousImprovementAgent",
+    # Community
+    "CommunityModelHub",
+    "FederatedLearningCoordinator",
+    # Protection
+    "ModelProtection",
 ]
