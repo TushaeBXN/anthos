@@ -327,8 +327,11 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                 input_ids_in = batch[:, :SEQ_LEN-1]
                 labels       = batch[:, 1:SEQ_LEN]
 
-            _dtype = torch.bfloat16 if device == "cuda" else torch.float32
-            with torch.amp.autocast(device_type="cuda" if device == "cuda" else "cpu", dtype=_dtype):
+            _autocast = (
+                torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if device == "cuda" else nullcontext()
+            )
+            with _autocast:
                 logits, aux = model(input_ids_in, n_loops=n_loops, return_aux=True)
 
                 if is_distill:

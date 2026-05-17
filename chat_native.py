@@ -67,12 +67,10 @@ def generate_response(model, tokenizer, prompt_ids: torch.Tensor,
     with torch.no_grad():
         out = model.generate(
             prompt_ids,
-            max_new_tokens   = max_new_tokens,
-            n_loops          = n_loops,
-            temperature      = 0.7,
-            top_k            = 40,
-            top_p            = 0.9,
-            repetition_penalty = 1.3,
+            max_new_tokens = max_new_tokens,
+            n_loops        = n_loops,
+            temperature    = 0.7,
+            top_k          = 40,
         )
 
     # Decode only new tokens (after the prompt)
