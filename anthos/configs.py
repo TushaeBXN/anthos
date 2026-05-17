@@ -414,9 +414,54 @@ def get_training_config(tier: str = "smoke"):
             run_name      = "anthos-history",
         )
 
+    elif tier == "identity_hardening":
+        # ── Identity hardening — burns Brian Tushae Thomas into weights ───────
+        # Uses data/phase2_train.jsonl (35% identity, 65% capability)
+        # Same small arch as smoke/history so it runs on MacBook CPU.
+        # Resume from any existing checkpoint:
+        #   python train.py --tier identity_hardening --resume checkpoints/mansa_sovereign/step_XXXXXX.pt
+        model_cfg = AnthosConfig(
+            vocab_size        = 50262,
+            dim               = 128,
+            n_heads           = 4,
+            n_kv_heads        = 2,
+            max_seq_len       = 256,
+            max_loop_iters    = 16,
+            prelude_layers    = 1,
+            coda_layers       = 1,
+            n_thought_tokens  = 8,
+            attn_type         = "gqa",
+            n_experts         = 4,
+            n_shared_experts  = 1,
+            n_experts_per_tok = 2,
+            expert_dim        = 64,
+            lora_rank         = 4,
+            moe_aux_coef      = 1e-2,
+            act_aux_coef      = 1e-3,
+        )
+        train_cfg = TrainingConfig(
+            device        = auto_device,
+            dtype         = "float32",
+            dataset       = "data/phase2_train.jsonl",
+            seq_len       = 256,
+            batch_size    = 1,
+            max_steps     = 10_000,
+            warmup_steps  = 500,
+            learning_rate = 1e-4,
+            min_lr        = 1e-5,
+            grad_accum    = 4,
+            phase1_steps  = 0,
+            phase1_loops  = 16,
+            phase2_loops  = 16,
+            log_every     = 100,
+            save_every    = 1000,
+            sample_every  = 1000,
+            run_name      = "anthos-identity",
+        )
+
     else:
         raise ValueError(
-            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct | sft | convo_smoke | history"
+            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct | sft | convo_smoke | history | identity_hardening"
         )
 
     return model_cfg, train_cfg
