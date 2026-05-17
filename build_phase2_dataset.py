@@ -55,33 +55,41 @@ CAPABILITY_SYSTEM = (
 # Formatters
 # ─────────────────────────────────────────────────────────────────────────────
 
+def to_conversations(system: str, human: str, assistant: str, source: str = "capability") -> dict:
+    """Output conversations format expected by ChatDataset."""
+    return {
+        "conversations": [
+            {"from": "system", "value": system},
+            {"from": "human",  "value": human},
+            {"from": "gpt",    "value": assistant},
+        ],
+        "source": source,
+    }
+
+# Keep old name as alias so nothing else breaks
 def to_chatml(system: str, human: str, assistant: str) -> dict:
-    text = (
-        f"<|im_start|>system\n{system}<|im_end|>\n"
-        f"<|im_start|>user\n{human}<|im_end|>\n"
-        f"<|im_start|>assistant\n{assistant}<|im_end|>"
-    )
-    return {"text": text, "source": "capability"}
+    return to_conversations(system, human, assistant)
 
 
 def conversations_to_chatml(record: dict) -> dict | None:
-    """Convert a conversations-format record to chatml text."""
+    """Pass through conversations-format records (already correct format)."""
     convs = record.get("conversations", [])
-    system    = next((c["value"] for c in convs if c["from"] == "system"), IDENTITY_SYSTEM)
+    system      = next((c["value"] for c in convs if c["from"] == "system"), IDENTITY_SYSTEM)
     human_turns = [c["value"] for c in convs if c["from"] == "human"]
     gpt_turns   = [c["value"] for c in convs if c["from"] == "gpt"]
 
     if not human_turns or not gpt_turns:
         return None
 
-    # Build multi-turn chatml
-    parts = [f"<|im_start|>system\n{system}<|im_end|>"]
+    # Rebuild as clean conversations list (multi-turn safe)
+    turns = []
+    turns.append({"from": "system", "value": system})
     for h, g in zip(human_turns, gpt_turns):
-        parts.append(f"<|im_start|>user\n{h}<|im_end|>")
-        parts.append(f"<|im_start|>assistant\n{g}<|im_end|>")
+        turns.append({"from": "human", "value": h})
+        turns.append({"from": "gpt",   "value": g})
 
     return {
-        "text":   "\n".join(parts),
+        "conversations": turns,
         "source": record.get("source", "identity_hardening"),
     }
 
