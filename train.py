@@ -112,6 +112,14 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         MIN_LR       = 5e-6
         WARMUP_STEPS = 500
         SEQ_LEN      = 256
+    elif tier == "identity_hardening":
+        MAX_STEPS    = 10_000
+        MAX_LR       = 1e-4
+        MIN_LR       = 1e-5
+        WARMUP_STEPS = 500
+        SEQ_LEN      = 256
+        LOG_EVERY    = 100
+        SAVE_EVERY   = 1000
     elif tier == "history":
         MAX_STEPS    = 5_000
         MAX_LR       = 3e-5
@@ -173,7 +181,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             optimizer.load_state_dict(ckpt["optimizer"])
             start_step = ckpt["step"]
 
-    is_sft      = (tier in ("sft", "instruct", "convo_smoke"))
+    is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening"))
     is_distill  = (tier == "distill")
     is_history  = (tier == "history")
 
@@ -232,7 +240,18 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         tok_path = "gpt2"
 
     elif is_sft:
-        if tier == "convo_smoke":
+        if tier == "identity_hardening":
+            local_data = "data/phase2_train.jsonl"
+            if not Path(local_data).exists():
+                raise FileNotFoundError(
+                    f"{local_data} not found.\n"
+                    "Run: python build_phase2_dataset.py"
+                )
+            dataset_name = local_data
+            max_samples  = 0
+            print(f"  ✓ Identity hardening: loading {local_data}")
+            print(f"    Creator: Brian Tushae Thomas | Model: Anthos")
+        elif tier == "convo_smoke":
             local_data = "data/teacher_conversations.jsonl"
             if Path(local_data).exists():
                 dataset_name = local_data
@@ -374,7 +393,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier",   type=str, default="proof",
-                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history"])
+                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history", "identity_hardening"])
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--steps",  type=int, default=None,
                         help="Override MAX_STEPS for this run (e.g. --steps 150000)")
