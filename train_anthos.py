@@ -303,15 +303,18 @@ def phase_foundation(resume: str | None = None):
 
 def phase_identity_hardening(resume: str | None = None):
     print("\n" + "═"*60)
-    print("  PHASE 2 — IDENTITY HARDENING")
+    print("  PHASE 2 — IDENTITY HARDENING (identity only — no capability data)")
     print("  Creator: Brian Tushae Thomas | Model: Anthos")
+    print("  Identity bakes into weights before any other learning begins.")
     print("═"*60)
 
-    data_path = "data/phase2_train.jsonl"
+    # Identity phase uses ONLY identity examples — no capability mixing.
+    # Capability data (coding, cybersecurity) is added in Phase 3 AFTER
+    # identity is fully locked into the weights.
+    data_path = "data/identity_hardening.jsonl"
     if not Path(data_path).exists():
         print(f"  ERROR: {data_path} not found.")
-        print("  Run: python generate_identity_data.py --n 10000")
-        print("       python build_phase2_dataset.py")
+        print("  Run: python generate_identity_data.py --n 50000")
         sys.exit(1)
 
     cfg   = get_1b_config()
@@ -353,7 +356,7 @@ def phase_identity_hardening(resume: str | None = None):
         optimizer    = optimizer,
         loader       = loader,
         phase        = "identity_hardening",
-        max_steps    = 10_000,
+        max_steps    = 20_000,   # 20k steps on identity-only data — bakes fully before capability
         max_lr       = 1e-4,
         min_lr       = 1e-5,
         warmup_steps = 500,
@@ -373,7 +376,9 @@ def phase_identity_hardening(resume: str | None = None):
 
 def phase_instruction(resume: str | None = None):
     print("\n" + "═"*60)
-    print("  PHASE 3 — INSTRUCTION TUNING")
+    print("  PHASE 3 — CAPABILITY / INSTRUCTION TUNING")
+    print("  Identity must be locked (Phase 2 complete) before this runs.")
+    print("  Adds coding, cybersecurity, and instruction-following on top.")
     print("═"*60)
 
     data_path = "data/teacher_conversations.jsonl"
