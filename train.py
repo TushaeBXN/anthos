@@ -265,7 +265,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             max_samples  = 0
             dataset_name = "Open-Orca/SlimOrca"
 
-        n_workers = 0 if tier == "convo_smoke" else 1
+        n_workers = 0 if tier in ("convo_smoke", "identity_hardening") else 1
         loader = get_chat_dataloader(
             seq_len        = SEQ_LEN,
             batch_size     = train_cfg.batch_size,
