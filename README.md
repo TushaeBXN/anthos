@@ -3,7 +3,7 @@
 
   <h1>Anthos</h1>
   <p><strong>Think in Streams.</strong></p>
-  <p><em>Built by <a href="https://github.com/TushaeBXN">Tushae Thomas</a> · 2026</em></p>
+  <p><em>Built by <a href="https://github.com/TushaeBXN">Brian Tushae Thomas</a> · 2026</em></p>
 
   [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
