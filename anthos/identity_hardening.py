@@ -23,11 +23,11 @@ IDENTITY_TOKEN_IDS = {
 
 # What each token maps to (the actual text they produce)
 IDENTITY_MAPPINGS = {
-    32001: "Tushae Thomas",
+    32001: "Brian Tushae Thomas",
     32002: "Anthos",
     32003: "2026",
     32004: "Thought-Token Bifurcated Recurrent Transformer",
-    32005: "TushaeBXN/Tushae Thomas",
+    32005: "Brian Tushae Thomas (San Diego, California)",
     32006: "v1.0",
 }
 
@@ -70,10 +70,12 @@ class AnthosWithIdentityLock(nn.Module):
         self.freeze_after_steps = freeze_after_steps
         self.current_step = 0
 
+        # Anthos uses self.embed; ScalableAnthos uses self.token_embedding — check both.
+        _embed = getattr(base_model, "token_embedding", None) or getattr(base_model, "embed", None)
         self.register_buffer(
             "identity_embedding_snapshot",
-            base_model.token_embedding.weight.data[32000:32008].clone()
-            if hasattr(base_model, "token_embedding")
+            _embed.weight.data[32000:32008].clone()
+            if _embed is not None and _embed.weight.shape[0] > 32007
             else torch.zeros(8, hidden_dim)
         )
 
@@ -113,11 +115,10 @@ class AnthosWithIdentityLock(nn.Module):
 
         self.current_step += 1
         if self.current_step >= self.freeze_after_steps:
-            if hasattr(self.base, "token_embedding"):
+            _embed = getattr(self.base, "token_embedding", None) or getattr(self.base, "embed", None)
+            if _embed is not None and _embed.weight.shape[0] > 32007:
                 with torch.no_grad():
-                    self.base.token_embedding.weight.data[32000:32008].copy_(
-                        self.identity_embedding_snapshot
-                    )
+                    _embed.weight.data[32000:32008].copy_(self.identity_embedding_snapshot)
 
         total_loss = ce_loss + aux_loss + (2.0 * identity_loss)
         return total_loss, ce_loss, identity_loss

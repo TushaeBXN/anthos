@@ -221,11 +221,12 @@ class GQAttention(nn.Module):
 
     def forward(
         self,
-        x:         torch.Tensor,
-        freqs_cis: torch.Tensor,
-        mask:      Optional[torch.Tensor] = None,
-        kv_cache:  Optional[dict]         = None,
-        cache_key: str                    = "default",
+        x:                torch.Tensor,
+        freqs_cis:        torch.Tensor,
+        mask:             Optional[torch.Tensor] = None,
+        kv_cache:         Optional[dict]         = None,
+        cache_key:        str                    = "default",
+        n_thought_prefix: int                    = 0,
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
@@ -237,10 +238,21 @@ class GQAttention(nn.Module):
         k = apply_rope(k, freqs_cis)
 
         if kv_cache is not None:
+            # Bifurcated caching: only sequence-token KVs accumulate in the cache.
+            # Thought tokens are regenerated fresh each decoding step, so including
+            # them in the cache would grow the context by n_thought per step (OOM bug).
+            k_seq = k[:, n_thought_prefix:, :]
+            v_seq = v[:, n_thought_prefix:, :]
             if cache_key in kv_cache:
-                k = torch.cat([kv_cache[cache_key]["k"], k], dim=1)
-                v = torch.cat([kv_cache[cache_key]["v"], v], dim=1)
-            kv_cache[cache_key] = {"k": k.detach(), "v": v.detach()}
+                k_seq = torch.cat([kv_cache[cache_key]["k"], k_seq], dim=1)
+                v_seq = torch.cat([kv_cache[cache_key]["v"], v_seq], dim=1)
+            kv_cache[cache_key] = {"k": k_seq.detach(), "v": v_seq.detach()}
+            # Rebuild full KV: fresh thought KVs (current step) + accumulated sequence KVs
+            if n_thought_prefix > 0:
+                k = torch.cat([k[:, :n_thought_prefix, :], k_seq], dim=1)
+                v = torch.cat([v[:, :n_thought_prefix, :], v_seq], dim=1)
+            else:
+                k, v = k_seq, v_seq
 
         S = k.shape[1]
         k = k.unsqueeze(3).expand(B, S, self.n_kv_heads, self.groups, self.head_dim).reshape(B, S, self.n_heads, self.head_dim)
@@ -277,11 +289,12 @@ class MLAttention(nn.Module):
 
     def forward(
         self,
-        x:         torch.Tensor,
-        freqs_cis: torch.Tensor,
-        mask:      Optional[torch.Tensor] = None,
-        kv_cache:  Optional[dict]         = None,
-        cache_key: str                    = "default",
+        x:                torch.Tensor,
+        freqs_cis:        torch.Tensor,
+        mask:             Optional[torch.Tensor] = None,
+        kv_cache:         Optional[dict]         = None,
+        cache_key:        str                    = "default",
+        n_thought_prefix: int                    = 0,
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
@@ -298,10 +311,21 @@ class MLAttention(nn.Module):
         k_rope  = apply_rope(k_rope, freqs_cis)
 
         if kv_cache is not None:
+            # Bifurcated caching: only sequence-token KV projections accumulate.
+            # Thought tokens are regenerated fresh each step; caching them would
+            # grow the KV sequence by n_thought per decoding step (OOM bug).
+            c_kv_seq   = c_kv[:, n_thought_prefix:, :]
+            k_rope_seq = k_rope[:, n_thought_prefix:, :]
             if cache_key in kv_cache:
-                c_kv   = torch.cat([kv_cache[cache_key]["c_kv"],   c_kv],   dim=1)
-                k_rope = torch.cat([kv_cache[cache_key]["k_rope"], k_rope], dim=1)
-            kv_cache[cache_key] = {"c_kv": c_kv.detach(), "k_rope": k_rope.detach()}
+                c_kv_seq   = torch.cat([kv_cache[cache_key]["c_kv"],   c_kv_seq],   dim=1)
+                k_rope_seq = torch.cat([kv_cache[cache_key]["k_rope"], k_rope_seq], dim=1)
+            kv_cache[cache_key] = {"c_kv": c_kv_seq.detach(), "k_rope": k_rope_seq.detach()}
+            # Rebuild: fresh thought KV projections + accumulated sequence KV projections
+            if n_thought_prefix > 0:
+                c_kv   = torch.cat([c_kv[:, :n_thought_prefix, :],   c_kv_seq],   dim=1)
+                k_rope = torch.cat([k_rope[:, :n_thought_prefix, :], k_rope_seq], dim=1)
+            else:
+                c_kv, k_rope = c_kv_seq, k_rope_seq
 
         S  = c_kv.shape[1]
         kv = self.kv_up(self.kv_norm(c_kv)).view(B, S, self.n_heads, self.qk_nope_dim + self.v_dim)
@@ -392,6 +416,9 @@ class MoEFFN(nn.Module):
         load       = counts.float() / (N * self.topk)
         aux_loss   = (self.n_experts * importance * load).sum()
 
+        # Store routing decisions for utilization logging (detached, not a gradient)
+        self._last_topk_idx = topk_idx.detach()
+
         for shared in self.shared_experts:
             out = out + shared(flat)
 
@@ -446,14 +473,15 @@ class TransformerBlock(nn.Module):
 
     def forward(
         self,
-        x:         torch.Tensor,
-        freqs_cis: torch.Tensor,
-        mask:      Optional[torch.Tensor] = None,
-        kv_cache:  Optional[dict]         = None,
-        cache_key: str                    = "default",
+        x:                torch.Tensor,
+        freqs_cis:        torch.Tensor,
+        mask:             Optional[torch.Tensor] = None,
+        kv_cache:         Optional[dict]         = None,
+        cache_key:        str                    = "default",
+        n_thought_prefix: int                    = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (output, aux_loss). aux_loss is 0 for dense blocks."""
-        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key)
+        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key, n_thought_prefix)
         if self.use_moe:
             ffn_out, aux = self.ffn(self.ffn_norm(x))
         else:
@@ -651,7 +679,7 @@ class AnthosRecurrentBlock(nn.Module):
             combined_freqs = _anthos_rope_freqs(freqs_cis, self.n_thought, T)
 
             cache_key         = f"anthos_loop_{t}"
-            full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key)
+            full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, self.n_thought)
             full_out          = full_out + self.lora(full_out, t)
             moe_aux_total     = moe_aux_total + moe_aux
 
@@ -783,6 +811,7 @@ class Anthos(nn.Module):
         kv_cache:     Optional[dict]            = None,
         return_aux:   bool                      = False,
         memory_state: Optional[MemoryBankState] = None,
+        start_pos:    int                       = 0,
     ):
         """
         Args:
@@ -791,6 +820,8 @@ class Anthos(nn.Module):
             kv_cache   — mutable dict for autoregressive KV caching
             return_aux — if True return (logits, aux_loss); add aux_loss to CE
                          during training for load-balancing + ACT regularization
+            start_pos  — position offset for RoPE during autoregressive decoding;
+                         ensures the new token gets the correct rotary position
 
         Returns:
             logits (B, T, vocab_size)  or  (logits, aux_loss) if return_aux
@@ -800,7 +831,8 @@ class Anthos(nn.Module):
 
         x = self.embed(input_ids)                          # (B, T, dim)
 
-        freqs_cis = self._get_rope_freqs(T, use_mla=(self.cfg.attn_type == "mla"))
+        use_mla   = (self.cfg.attn_type == "mla")
+        freqs_cis = self._get_rope_freqs(T + start_pos, use_mla=use_mla)[start_pos:]
 
         # Standard causal mask for prelude/coda (no thought tokens)
         std_mask = self._causal_mask(T, device) if T > 1 else None
@@ -822,13 +854,21 @@ class Anthos(nn.Module):
         for i, layer in enumerate(self.coda):
             x, _ = layer(x, freqs_cis, std_mask, kv_cache, cache_key=f"coda_{i}")
 
-        logits = self.head(self.norm(x))
+        x_normed = self.norm(x)
+        self._last_hidden_states = x_normed   # exposed for AnthosWithIdentityLock
+        logits = self.head(x_normed)
 
         if not return_aux:
             return logits
 
         aux_loss = self.cfg.moe_aux_coef * moe_aux + self.cfg.act_aux_coef * act_aux
         return logits, aux_loss
+
+    def get_hidden_states(self) -> torch.Tensor:
+        """Returns the final-layer hidden states from the most recent forward pass."""
+        if not hasattr(self, "_last_hidden_states"):
+            raise RuntimeError("No forward pass has been run yet.")
+        return self._last_hidden_states
 
     @torch.no_grad()
     def generate(
@@ -839,13 +879,19 @@ class Anthos(nn.Module):
         temperature:    float = 1.0,
         top_k:          int   = 50,
     ) -> torch.Tensor:
-        """Autoregressive generation with KV caching."""
+        """Autoregressive generation with KV caching and correct RoPE positions."""
         kv_cache  = {}
         generated = input_ids
 
         for step in range(max_new_tokens):
-            ctx    = generated if step == 0 else generated[:, -1:]
-            logits = self.forward(ctx, n_loops=n_loops, kv_cache=kv_cache)
+            if step == 0:
+                ctx       = generated
+                start_pos = 0
+            else:
+                ctx       = generated[:, -1:]
+                start_pos = generated.shape[1] - 1  # position of the new token
+
+            logits = self.forward(ctx, n_loops=n_loops, kv_cache=kv_cache, start_pos=start_pos)
             logits = logits[:, -1, :] / temperature
 
             if top_k > 0:
@@ -857,6 +903,41 @@ class Anthos(nn.Module):
             generated  = torch.cat([generated, next_token], dim=1)
 
         return generated
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Expert utilization logging
+# ─────────────────────────────────────────────────────────────────────────────
+
+def log_expert_utilization(model: "Anthos") -> dict:
+    """
+    Returns MoE routing statistics after a forward pass.
+
+    Call once per logging interval (e.g. every 100 steps) to monitor whether
+    experts are specializing or collapsing to a few dominant experts.
+
+    Returns a dict with:
+        max_expert_pct   — fraction of tokens routed to the busiest expert (%)
+        min_expert_pct   — fraction routed to the least-used expert (%)
+        zero_expert_count — number of experts that received zero tokens
+        expert_entropy   — routing entropy; lower = more specialization
+    """
+    moe = model.recurrent.block.ffn
+    if not isinstance(moe, MoEFFN) or not hasattr(moe, "_last_topk_idx"):
+        return {}
+
+    idx = moe._last_topk_idx.reshape(-1)
+    counts = torch.bincount(idx, minlength=moe.n_experts).float()
+    total  = counts.sum().clamp(min=1)
+    pct    = counts / total * 100.0
+    p      = pct / 100.0 + 1e-9
+
+    return {
+        "max_expert_pct":    pct.max().item(),
+        "min_expert_pct":    pct.min().item(),
+        "zero_expert_count": int((counts == 0).sum().item()),
+        "expert_entropy":    float(-(p * p.log()).sum().item()),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────

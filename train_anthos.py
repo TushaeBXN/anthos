@@ -206,7 +206,21 @@ def train_loop(
                     labels    = batch[1].to(DEVICE)[:, :seq_len]
                     logits, aux = model(input_ids, n_loops=16, return_aux=True)
                     ce   = eaft(logits, labels)
-                    loss = (ce + aux) / grad_accum
+                    # identity_loss_weight scales extra emphasis on identity-labeled
+                    # tokens when using AnthosWithIdentityLock (id_loss > 0 only then)
+                    id_loss = torch.zeros(1, device=logits.device)
+                    if hasattr(model, "identity_head"):
+                        try:
+                            hidden = model.base.get_hidden_states()
+                            id_logits = model.identity_head(hidden)
+                            id_mask = (labels >= 32000) & (labels <= 32007)
+                            if id_mask.any():
+                                id_loss = F.cross_entropy(
+                                    id_logits[id_mask], labels[id_mask] - 32000
+                                )
+                        except Exception:
+                            pass
+                    loss = (ce + aux + identity_loss_weight * id_loss) / grad_accum
                 else:
                     input_ids = batch.to(DEVICE)
                     x, y      = input_ids[:, :-1], input_ids[:, 1:]
@@ -440,10 +454,14 @@ def phase_grow_3b(resume: str | None = None):
     base_model = ScalableAnthos(cfg).to(DEVICE)
 
     # Load best 1B checkpoint
+    # NOTE: ScalableAnthos uses different parameter names than the main Anthos class
+    # (token_embedding vs embed, recurrent_blocks vs recurrent, etc.). strict=False
+    # means mismatched keys are silently skipped. Expect most params to re-initialize.
+    # For full weight transfer, prefer exporting anthos_3b() from a trained Anthos model.
     ckpt_1b = resume or "checkpoints/anthos-1b/instruction_final.pt"
     if Path(ckpt_1b).exists():
         load(base_model, None, ckpt_1b)
-        print("  ✓ 1B weights loaded")
+        print("  ✓ 1B checkpoint loaded (see above for any new/missing param counts)")
     else:
         print(f"  ⚠ No 1B checkpoint at {ckpt_1b} — starting 3B from scratch")
 

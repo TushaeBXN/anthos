@@ -39,6 +39,7 @@ from anthos import Anthos, AnthosConfig
 from anthos.identity_hardening import AnthosWithIdentityLock, CheckpointSigner
 from anthos.data_pipeline import AnthosDataPipeline, _to_conversation
 from anthos.stream_fineweb import StreamingFineWebDataset
+from anthos.main import log_expert_utilization
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -70,6 +71,12 @@ RUNPOD_CONFIG = {
     "fineweb_limit":    2_000_000,  # stream up to 2M examples
     "teacher_examples": 50_000,
     "identity_repeat":  5_000,
+
+    # Auxiliary loss warmup — ramp moe_aux_coef and act_aux_coef from 0 → full
+    # over the first aux_warmup_steps steps to prevent early training instability.
+    "aux_warmup_steps": 5_000,
+    "base_moe_aux_coef": 1e-2,
+    "base_act_aux_coef": 1e-3,
 }
 
 
@@ -193,6 +200,10 @@ class RunPodTrainer:
             num_warmup_steps=config["warmup_steps"],
             num_training_steps=config["total_steps"],
         )
+
+        # Aux loss warmup — store base coefficients so warmup can scale them
+        self._base_moe_coef = config.get("base_moe_aux_coef", 1e-2)
+        self._base_act_coef = config.get("base_act_aux_coef", 1e-3)
 
         # WandB — optional
         self.wandb_enabled = False
@@ -351,6 +362,9 @@ class RunPodTrainer:
                 self.global_step += 1
                 accum_step = 0
 
+                # Scale auxiliary losses during warmup window
+                self._apply_aux_warmup()
+
                 # Logging
                 if self.is_main:
                     avg_loss = accum_loss / self.config["grad_accum_steps"]
@@ -362,16 +376,33 @@ class RunPodTrainer:
                         pbar.set_postfix(loss=f"{avg_loss:.4f}", src=name)
                         pbar.update(1)
 
+                    # Log MoE expert utilization every 500 steps
+                    expert_stats = {}
+                    if self.global_step % 500 == 0:
+                        try:
+                            expert_stats = log_expert_utilization(self._get_base_model())
+                            if expert_stats:
+                                print(
+                                    f"  [MoE] max={expert_stats['max_expert_pct']:.1f}% "
+                                    f"min={expert_stats['min_expert_pct']:.1f}% "
+                                    f"dead={expert_stats['zero_expert_count']} "
+                                    f"entropy={expert_stats['expert_entropy']:.3f}"
+                                )
+                        except Exception:
+                            pass
+
                     if self.wandb_enabled:
                         import wandb
-                        wandb.log({
+                        log_dict = {
                             "loss":    avg_loss,
                             "ce_loss": avg_ce,
                             "id_loss": avg_id,
                             "lr":      self.scheduler.get_last_lr()[0],
                             "step":    self.global_step,
                             "source":  name,
-                        })
+                        }
+                        log_dict.update({f"moe/{k}": v for k, v in expert_stats.items()})
+                        wandb.log(log_dict)
 
                     # Checkpoint
                     if self.global_step % self.config["checkpoint_steps"] == 0:
@@ -401,6 +432,37 @@ class RunPodTrainer:
         })
         torch.save(checkpoint, path)
         print(f"  Checkpoint saved → {path}")
+
+    def _apply_aux_warmup(self):
+        """
+        Ramp MoE and ACT auxiliary loss coefficients from 0 → full over the
+        first aux_warmup_steps steps.  Prevents large aux_loss spikes from
+        destabilizing the base language modeling loss during early training.
+        """
+        warmup = self.config.get("aux_warmup_steps", 5000)
+        if self.global_step >= warmup:
+            return
+        scale = (self.global_step + 1) / warmup
+
+        # Walk the model to find all AnthosConfig objects and scale their coefficients
+        raw = self.model
+        if hasattr(raw, "module"):
+            raw = raw.module
+        if hasattr(raw, "base"):
+            raw = raw.base
+        for module in raw.modules():
+            if hasattr(module, "cfg"):
+                module.cfg.moe_aux_coef = self._base_moe_coef * scale
+                module.cfg.act_aux_coef = self._base_act_coef * scale
+
+    def _get_base_model(self):
+        """Unwrap DDP/DataParallel/IdentityLock wrappers to reach the Anthos core."""
+        m = self.model
+        if hasattr(m, "module"):
+            m = m.module
+        if hasattr(m, "base"):
+            m = m.base
+        return m
 
 
 # ─────────────────────────────────────────────────────────────────────────────

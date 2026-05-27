@@ -128,6 +128,9 @@ class ScalableAnthos(nn.Module):
         self.thought_embedding = nn.Parameter(
             torch.randn(cfg.n_thought_tokens, cfg.dim) * 0.02
         )
+        # n_layers is ScalableAnthos-specific. Fall back to max_loop_iters when
+        # given a standard AnthosConfig (which uses prelude/coda/loop structure).
+        n_layers = getattr(cfg, "n_layers", None) or getattr(cfg, "max_loop_iters", 16)
         self.recurrent_blocks = nn.ModuleList([
             RecurrentBlock(
                 cfg.dim,
@@ -135,7 +138,7 @@ class ScalableAnthos(nn.Module):
                 n_experts=getattr(cfg, "n_experts", 0),
                 expert_dim=getattr(cfg, "expert_dim", 256)
             )
-            for _ in range(cfg.n_layers)
+            for _ in range(n_layers)
         ])
         self.norm = nn.LayerNorm(cfg.dim)
         self.lm_head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
@@ -269,11 +272,11 @@ if __name__ == "__main__":
     cfg = AnthosConfig(
         vocab_size=32008,
         dim=2048,
-        n_layers=24,
         n_heads=16,
         n_thought_tokens=16,
         n_experts=64,
         expert_dim=256,
+        max_loop_iters=24,   # ScalableAnthos uses max_loop_iters as layer count
     )
     model = ScalableAnthos(cfg)
     print(f"Initial size: {model._compute_params():.2f}B params")
