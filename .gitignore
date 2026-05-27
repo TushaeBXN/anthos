@@ -57,3 +57,11 @@ data/anthos_tokenizer/
 
 # Claude Code settings
 .claude/
+
+# Private / sensitive files — NEVER push to GitHub
+anthos/guardrails.py
+anthos/serve.py
+anthos/godhead_armor.py
+tests/test_guardrails.py
+tests/verify_serve_guardrails.py
+docs/GUARDRAILS.md
