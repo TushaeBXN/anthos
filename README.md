@@ -630,10 +630,10 @@ Removing the identity would require retraining from scratch. It is not a system 
 
 ## License
 
-CC BY-NC 4.0 — Copyright (c) 2026 Tushae Thomas. Non-commercial use only. See [LICENSE](LICENSE) for full text.
+CC BY-NC 4.0 — Copyright (c) 2026 Brian Tushae Thomas. Non-commercial use only. See [LICENSE](LICENSE) for full text.
 
 ---
 
 <div align="center">
-  <sub>Built by <a href="https://github.com/TushaeBXN">Tushae Thomas</a> · Think in Streams.</sub>
+  <sub>Built by <a href="https://github.com/TushaeBXN">Brian Tushae Thomas</a> · Think in Streams.</sub>
 </div>
