@@ -93,10 +93,18 @@ Input IDs (B, T)
 
 ### Bug 1 — ACT Remainder Probability Mass Drop
 **File:** `anthos/main.py`, `AnthosRecurrentBlock.forward()`, ~line 697-703  
-**What happens:** When `cumulative_p + p >= act_threshold`, the weight is set to `remainder` (correct for the halting token). But positions that halted in a *previous* iteration may still receive non-zero weight if `still_running` masking has a subtle off-by-one. Specifically: once `halted` is set to True for a position, `still_running = ~halted` correctly zeros future contributions — but the weight accumulation for the iteration where halting *first* triggers uses `remainder` correctly. The deeper issue is that `h_out` accumulation does not enforce that `sum(weights_over_loops) = 1.0` per position after the loop exits early (via `if halted.all(): break`). Positions that halted before `max_loop_iters` may sum to less than 1.0 if the final `remainder` weight was not fully applied.
+**What happens:** Two distinct failure modes exist in the current accumulation:
 
-**Verify:** After any halting logic change, assert `weight_sum.allclose(ones)` across all positions for test inputs.  
-**Rule:** Any ACT change must be followed by probability mass conservation check.
+- **Under-accumulation (<1.0):** Positions that halt before `max_loop_iters` via the `if halted.all(): break` early exit may not receive their full `remainder` weight if other positions triggered the early exit while this position had just halted at the same step. The `still_running.float()` mask zeros correctly, but the final-step `remainder` may not be applied if the loop breaks before the accumulation line runs for this position.
+
+- **Over-accumulation (>1.0):** Positions that never reach `act_threshold` by the end of the loop accumulate raw `p` weights every iteration without a `remainder` cap, because the `where(cumulative_p + p >= threshold, remainder, p)` branch is never taken. Total weight can exceed 1.0 for persistently un-halted positions.
+
+**Verify:** After any halting logic change, assert both bounds hold for all positions:
+```python
+assert weight_sum.min() >= 1.0 - 1e-4  # no under-accumulation
+assert weight_sum.max() <= 1.0 + 1e-4  # no over-accumulation
+```
+**Rule:** Any ACT change must be followed by probability mass conservation check — test both directions.
 
 ### Bug 2 — MoE Aux Loss Unnormalized Accumulation
 **File:** `anthos/main.py`, `AnthosRecurrentBlock.forward()`, ~line 684  
@@ -135,6 +143,19 @@ Input IDs (B, T)
 - **Production:** GCP — Anthos/GKE, Cloud Run, Cloud SQL, Firestore, Firebase Auth, Stripe
 - **GitHub:** TushaeBXN (primary), TushaeThomas
 - **HuggingFace:** machomenc
+
+---
+
+## Two Entities Named "Nia"
+
+These are separate agents that share a name. Do not conflate them:
+
+| Entity | Location | Role |
+|---|---|---|
+| **Nia (Minister of Verdicts)** | Local, runs via Ollama `nia` model, `~/nia-squad/` | Binary APPROVED/REJECTED verdicting agent; coordinates with squad (Mike, Kelly, Keisha, David, Pamela) via file-based markdown only |
+| **NiaAgent (Platform)** | `anthos-platform/backend/agents/nia.py` | Public-facing community assistant — serves underserved communities (financial literacy, crisis navigation, history); NOT a verdicting agent |
+
+The platform NiaAgent persona: "Jasmine Crockett sharp, Maya Angelou soft, MLK measured, Malcolm X direct, Black Panthers grassroots." Completely different system prompt, different purpose, same Ollama model tag (`nia`).
 
 ---
 

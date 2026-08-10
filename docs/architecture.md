@@ -163,7 +163,7 @@ This lets the same shared weights implement functionally distinct operations at 
 | `vocab_size` | int | 32000 | Token vocabulary size |
 | `dim` | int | 2048 | Hidden dimension |
 | `n_heads` | int | 16 | Query attention heads |
-| `n_kv_heads` | int | 4 | KV heads (GQA) |
+| `n_kv_heads` | int | 8 | KV heads (GQA) |
 | `max_seq_len` | int | 4096 | Max sequence length |
 | `max_loop_iters` | int | 16 | Recurrent depth |
 | `prelude_layers` | int | 2 | Standard blocks before recurrent |

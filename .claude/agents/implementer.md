@@ -68,13 +68,17 @@ print('MoE smoke PASS — verify moe_aux normalized by loop count')
 ### ACT Bug (anthos/main.py, AnthosRecurrentBlock.forward())
 When modifying any halting logic: verify that `sum(weight per position across loops) ≈ 1.0`. The current accumulation may drop probability mass at positions that halt before `max_loop_iters` when `halted.all()` triggers early exit.
 
-**Minimum fix pattern:**
+**Two failure modes — both must be fixed:**
+
+- **Under-accumulation (<1.0):** Positions that halt just as `halted.all()` triggers early exit may miss their `remainder` weight if the loop breaks before accumulation runs. Fix: apply remainder in the same step halting is detected, before any break check.
+- **Over-accumulation (>1.0):** Positions that never reach `act_threshold` accumulate raw `p` every loop with no cap. Fix: at loop end, clamp `h_out` by computing the unfulfilled remainder and applying it.
+
+**Minimum diagnostic assertion (add after the loop):**
 ```python
-# After the loop, any position where cumulative_p < act_threshold
-# needs remainder weight applied to h_out
-unfulfilled = (cumulative_p < cfg.act_threshold) & ~halted
-# h_out already received weight; this is a diagnostic assertion only
-# assert (cumulative_p.clamp(max=1.0)).allclose(ones) — or fix the accumulation
+# weight_sum = cumulative_p (since weight tracks p for non-halting and remainder at halt)
+# Assert both bounds:
+assert weight_sum.min() >= 1.0 - 1e-4, f"under-accumulation: min={weight_sum.min()}"
+assert weight_sum.max() <= 1.0 + 1e-4, f"over-accumulation: max={weight_sum.max()}"
 ```
 
 ### MoE Normalization Bug (anthos/main.py, AnthosRecurrentBlock.forward())
