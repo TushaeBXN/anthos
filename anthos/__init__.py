@@ -144,6 +144,22 @@ from anthos.autonomous_agent import AutonomousImprovementAgent
 from anthos.community import CommunityModelHub, FederatedLearningCoordinator
 from anthos.self_destruct import ModelProtection
 
+from anthos.compliance_learnings import LearningsLog
+from anthos.nist_context import (
+    build_session_context,
+    detect_output_type,
+    load_nist_controls,
+    load_recent_learnings,
+    load_hard_rules,
+)
+from anthos.llm_verifier import (
+    VerifierGate,
+    ClaimScopeChecker,
+    NistAccuracyChecker,
+    VerificationResult,
+    make_retry_note,
+)
+
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"
 __all__ = [
@@ -272,4 +288,16 @@ __all__ = [
     "FederatedLearningCoordinator",
     # Protection
     "ModelProtection",
+    # LLM output verifier + compliance learnings loop
+    "LearningsLog",
+    "build_session_context",
+    "detect_output_type",
+    "load_nist_controls",
+    "load_recent_learnings",
+    "load_hard_rules",
+    "VerifierGate",
+    "ClaimScopeChecker",
+    "NistAccuracyChecker",
+    "VerificationResult",
+    "make_retry_note",
 ]

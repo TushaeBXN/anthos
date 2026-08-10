@@ -46,6 +46,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import anthropic
 
+from anthos.compliance_learnings import LearningsLog
+from anthos.llm_verifier import VerifierGate, make_retry_note
+from anthos.nist_context import build_session_context, detect_output_type
+
 # ─────────────────────────────────────────────────────────────────────────────
 # TOPIC BANK — 600+ unique topics, never repeated
 # ─────────────────────────────────────────────────────────────────────────────
@@ -578,33 +582,38 @@ def load_flan_examples(seen: SeenSet, limit: int = 10000) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Claude API call
+# Verifier gate — module-level singleton, initialized in main()
 # ─────────────────────────────────────────────────────────────────────────────
-def generate_claude_example(
+_learnings: LearningsLog | None = None
+_verifier:  VerifierGate | None = None
+
+
+def _init_verifier(output_type: str) -> None:
+    """Create the shared LearningsLog and VerifierGate for this session."""
+    global _learnings, _verifier
+    _learnings = LearningsLog()
+    _verifier  = VerifierGate(_learnings, output_type=output_type)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Claude API call — with verifier gate and retry loop
+# ─────────────────────────────────────────────────────────────────────────────
+def _call_api(
     client: anthropic.Anthropic,
+    system: str,
     instruction: str,
     tracker: CostTracker,
-) -> dict | None:
+) -> str | None:
+    """Single raw API call; returns answer text or None on error."""
     try:
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=512,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=[{"role": "user", "content": instruction}],
         )
         tracker.add(response.usage)
-        answer = response.content[0].text.strip()
-        if not answer:
-            return None
-
-        return {
-            "conversations": [
-                {"from": "system", "value": "You are Anthos, a helpful and honest assistant."},
-                {"from": "human",  "value": instruction},
-                {"from": "gpt",    "value": answer},
-            ],
-            "_source": "claude_haiku",
-        }
+        return response.content[0].text.strip() or None
     except anthropic.RateLimitError:
         print("  ⚠ Rate limit — waiting 30s...", flush=True)
         time.sleep(30)
@@ -615,6 +624,65 @@ def generate_claude_example(
     except Exception as e:
         print(f"  ⚠ Error: {e}", flush=True)
         return None
+
+
+def generate_claude_example(
+    client: anthropic.Anthropic,
+    instruction: str,
+    tracker: CostTracker,
+) -> dict | None:
+    """
+    Generate one training example via Claude, then run it through the verifier
+    gate.  On failure, inject the rejection reason and retry up to MAX_RETRIES
+    times.  Returns None if the output cannot pass the verifier.
+    """
+    output_type = detect_output_type(instruction)
+
+    # Build session-start context (SELECT layer) for the first call.
+    # Subsequent retries get the rejection note appended instead.
+    session_ctx  = build_session_context(output_type)
+    system_base  = SYSTEM_PROMPT + session_ctx
+
+    gate = _verifier if _verifier is not None else VerifierGate(
+        LearningsLog(), output_type=output_type
+    )
+
+    current_system = system_base
+    current_prompt = instruction
+
+    for attempt in range(1, gate.MAX_RETRIES + 1):
+        answer = _call_api(client, current_system, current_prompt, tracker)
+        if answer is None:
+            return None
+
+        passed, failure_reason = gate.verify(answer)
+        if passed:
+            return {
+                "conversations": [
+                    {"from": "system", "value": "You are Anthos, a helpful and honest assistant."},
+                    {"from": "human",  "value": instruction},
+                    {"from": "gpt",    "value": answer},
+                ],
+                "_source": "claude_haiku",
+            }
+
+        # Blocked — build retry prompt with rejection context
+        if attempt < gate.MAX_RETRIES:
+            rejection_note = make_retry_note(failure_reason)
+            current_system = system_base + rejection_note
+            print(
+                f"  ↺ Verifier blocked attempt {attempt}/{gate.MAX_RETRIES}: "
+                f"{failure_reason[:80]}",
+                flush=True,
+            )
+        else:
+            print(
+                f"  ✗ Output blocked after {gate.MAX_RETRIES} attempts — skipping. "
+                f"Reason: {failure_reason[:80]}",
+                flush=True,
+            )
+
+    return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -670,6 +738,10 @@ def main():
     out      = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     seen_file = out.parent / f".seen_{out.stem}.txt"
+
+    # ── Initialize verifier gate (SELECT layer runs here) ────────────────────
+    # output_type "general" is used at session start; per-call type is auto-detected
+    _init_verifier("general")
 
     # ── Set up seen-prompt tracker ───────────────────────────────────────────
     seen = SeenSet(seen_file)
