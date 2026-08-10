@@ -28,6 +28,43 @@ from pathlib import Path
 from datasets import load_dataset
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Eval context loop — load dataset targeting flags when available
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FLAGS_PATH = Path(__file__).parent / "eval" / "dataset_targeting_flags.json"
+_TARGETING_FLAGS: dict = {}
+
+if _FLAGS_PATH.exists():
+    try:
+        with open(_FLAGS_PATH, encoding="utf-8") as _f:
+            _TARGETING_FLAGS = json.load(_f)
+        _phase = _TARGETING_FLAGS.get("phase", "")
+        # Only apply flags generated for the Alignment phase
+        if _phase == "Alignment":
+            print("\n[targeting] Applying eval targeting flags from eval/dataset_targeting_flags.json")
+            print(f"  top failures   : {_TARGETING_FLAGS.get('top_failure_patterns', [])}")
+            print(f"  weak modalities: {_TARGETING_FLAGS.get('weak_modalities', [])}")
+            print(f"  low domains    : {_TARGETING_FLAGS.get('low_metric_domains', [])}")
+            print(f"  generated at   : {_TARGETING_FLAGS.get('generated_at', 'unknown')}\n")
+        else:
+            _TARGETING_FLAGS = {}  # ignore cross-phase flags
+    except (json.JSONDecodeError, OSError):
+        _TARGETING_FLAGS = {}
+
+
+def _targeted_cap(default_cap: int, domain: str) -> int:
+    """
+    Return a sampling cap for a domain, boosted when eval flags identify it as
+    weak. Weak domains receive 1.5× their default cap; low-priority domains
+    receive 0.7× their cap. The cap is always a positive integer.
+    """
+    low_domains = set(_TARGETING_FLAGS.get("low_metric_domains", []))
+    top_failures = " ".join(_TARGETING_FLAGS.get("top_failure_patterns", [])).lower()
+    if domain in low_domains or domain.lower() in top_failures:
+        return max(1, int(default_cap * 1.5))
+    return default_cap
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Paths
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -166,14 +203,15 @@ try:
 except Exception as e:
     print(f"  ⚠ Skipped: {e}")
 
-# ── 2. Evol-Instruct advanced coding (20k cap) ──────────────────────────────
-print("Loading Evol-Instruct coding dataset...")
+# ── 2. Evol-Instruct advanced coding (20k cap, adjustable via targeting flags)
+_evol_cap = _targeted_cap(20000, "coding")
+print(f"Loading Evol-Instruct coding dataset (cap={_evol_cap:,})...")
 try:
     ds3 = load_dataset("nickrosh/Evol-Instruct-Code-80k-v1", split="train")
     before = len(capability_records)
     count  = 0
     for ex in ds3:
-        if count >= 20000:
+        if count >= _evol_cap:
             break
         instruction = ex.get("instruction", "").strip()
         output      = ex.get("output", "").strip()
@@ -184,14 +222,15 @@ try:
 except Exception as e:
     print(f"  ⚠ Skipped: {e}")
 
-# ── 3. Cybersecurity — Fenrir (30k cap) ─────────────────────────────────────
-print("Loading Fenrir cybersecurity dataset...")
+# ── 3. Cybersecurity — Fenrir (30k cap, adjustable via targeting flags) ──────
+_fenrir_cap = _targeted_cap(30000, "cybersecurity")
+print(f"Loading Fenrir cybersecurity dataset (cap={_fenrir_cap:,})...")
 try:
     ds2   = load_dataset("AlicanKiraz0/Cybersecurity-Dataset-Fenrir-v2.1", split="train")
     before = len(capability_records)
     count  = 0
     for ex in ds2:
-        if count >= 30000:
+        if count >= _fenrir_cap:
             break
         human = (ex.get("user") or "").strip()
         gpt   = (ex.get("assistant") or "").strip()
@@ -202,14 +241,15 @@ try:
 except Exception as e:
     print(f"  ⚠ Skipped: {e}")
 
-# ── 4. CVE dataset (10k cap) ─────────────────────────────────────────────────
-print("Loading CVE dataset...")
+# ── 4. CVE dataset (10k cap, adjustable via targeting flags) ─────────────────
+_cve_cap = _targeted_cap(10000, "cybersecurity")
+print(f"Loading CVE dataset (cap={_cve_cap:,})...")
 try:
     ds3b  = load_dataset("Trendyol/All-CVE-Chat-MultiTurn-1999-2025-Dataset", split="train")
     before = len(capability_records)
     count  = 0
     for ex in ds3b:
-        if count >= 10000:
+        if count >= _cve_cap:
             break
         human = ex.get("User", "").strip()
         gpt   = ex.get("Assistant", "").strip()

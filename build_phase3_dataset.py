@@ -8,7 +8,45 @@ Usage: python3 build_phase3_dataset.py
 import json
 import os
 import random
+from pathlib import Path
 from datasets import load_dataset
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Eval context loop — load dataset targeting flags when available
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FLAGS_PATH = Path(__file__).parent / "eval" / "dataset_targeting_flags.json"
+_TARGETING_FLAGS: dict = {}
+
+if _FLAGS_PATH.exists():
+    try:
+        with open(_FLAGS_PATH, encoding="utf-8") as _f:
+            _TARGETING_FLAGS = json.load(_f)
+        _phase = _TARGETING_FLAGS.get("phase", "")
+        # Apply flags for Pretraining or Instruction phases (Phase 3 serves both)
+        if _phase in ("Pretraining", "Instruction"):
+            print("\n[targeting] Applying eval targeting flags from eval/dataset_targeting_flags.json")
+            print(f"  top failures   : {_TARGETING_FLAGS.get('top_failure_patterns', [])}")
+            print(f"  weak modalities: {_TARGETING_FLAGS.get('weak_modalities', [])}")
+            print(f"  low domains    : {_TARGETING_FLAGS.get('low_metric_domains', [])}")
+            print(f"  generated at   : {_TARGETING_FLAGS.get('generated_at', 'unknown')}\n")
+        else:
+            _TARGETING_FLAGS = {}
+    except (json.JSONDecodeError, OSError):
+        _TARGETING_FLAGS = {}
+
+
+def _targeted_cap(default_cap: int, domain: str) -> int:
+    """
+    Return a sampling cap for a domain, boosted 1.5× when the eval flags
+    that domain as weak, reduced to 0.7× when it is not a priority.
+    """
+    low_domains  = set(_TARGETING_FLAGS.get("low_metric_domains", []))
+    top_failures = " ".join(_TARGETING_FLAGS.get("top_failure_patterns", [])).lower()
+    if domain in low_domains or domain.lower() in top_failures:
+        return max(1, int(default_cap * 1.5))
+    return default_cap
+
 
 # Use all identity examples — identity is the most important hook
 IDENTITY_CAP = None  # No cap — use every identity example available
@@ -81,14 +119,15 @@ if os.path.exists(TARS_PATH):
                 pass
 print(f"  TARS examples: {tars_count}")
 
-# ── 3. Fenrir cybersecurity (20k) ─────────────────────────────────────────────
-print("Loading Fenrir cybersecurity...")
+# ── 3. Fenrir cybersecurity (20k base cap, adjustable via targeting flags) ────
+_fenrir_cap = _targeted_cap(20000, "cybersecurity")
+print(f"Loading Fenrir cybersecurity (cap={_fenrir_cap:,})...")
 try:
     fenrir_start = len(other_records)
     ds = load_dataset("AlicanKiraz0/Cybersecurity-Dataset-Fenrir-v2.1", split="train")
     count = 0
     for ex in ds:
-        if count >= 20000:
+        if count >= _fenrir_cap:
             break
         human = (ex.get("user") or "").strip()
         gpt   = (ex.get("assistant") or "").strip()
@@ -99,14 +138,15 @@ try:
 except Exception as e:
     print(f"  Skipped Fenrir: {e}")
 
-# ── 4. CVE data (10k) ─────────────────────────────────────────────────────────
-print("Loading CVE data...")
+# ── 4. CVE data (10k base cap, adjustable via targeting flags) ────────────────
+_cve_cap = _targeted_cap(10000, "cybersecurity")
+print(f"Loading CVE data (cap={_cve_cap:,})...")
 try:
     cve_start = len(other_records)
     ds2 = load_dataset("Trendyol/All-CVE-Chat-MultiTurn-1999-2025-Dataset", split="train")
     count = 0
     for ex in ds2:
-        if count >= 10000:
+        if count >= _cve_cap:
             break
         human = ex.get("User", "").strip()
         gpt   = ex.get("Assistant", "").strip()
@@ -117,14 +157,15 @@ try:
 except Exception as e:
     print(f"  Skipped CVE: {e}")
 
-# ── 5. Python coding (10k) ────────────────────────────────────────────────────
-print("Loading coding data...")
+# ── 5. Python coding (10k base cap, adjustable via targeting flags) ───────────
+_code_cap = _targeted_cap(10000, "coding")
+print(f"Loading coding data (cap={_code_cap:,})...")
 try:
     code_start = len(other_records)
     ds3 = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
     count = 0
     for ex in ds3:
-        if count >= 10000:
+        if count >= _code_cap:
             break
         instruction = ex.get("instruction", "").strip()
         output      = ex.get("output", "").strip()

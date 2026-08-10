@@ -2,6 +2,7 @@
 import json
 import time
 import os
+from pathlib import Path
 from typing import Optional
 
 
@@ -88,6 +89,105 @@ class AnthosBenchmark:
         with open(results_file, "w") as f:
             json.dump(self.results, f, indent=2)
         print(f"Results saved to {results_file}")
+
+    def run_with_context_loop(
+        self,
+        phase: str,
+        variant: str,
+        modality: str = "text",
+        limit_per_task: int = 100,
+        routing_distribution: Optional[dict] = None,
+        modalities_tested: Optional[list] = None,
+        expert_activation_rate: Optional[float] = None,
+        failures: Optional[list] = None,
+        missing: str = "",
+    ) -> dict:
+        """
+        Run benchmarks and feed results through the eval context engineering loop.
+
+        Calls run_all(), then passes metrics through EvalContextLoop.verify_and_write()
+        which runs the verifier gate, appends to eval_learnings.md, handles escalation,
+        compression, and writes dataset targeting flags.
+
+        Parameters
+        ----------
+        phase                 : "Alignment" | "Pretraining" | "Instruction"
+        variant               : model variant name (e.g. "anthos_1b")
+        modality              : "text" | "vision" | "audio" | "multi"
+        limit_per_task        : max benchmark samples per task
+        routing_distribution  : {"hard": float, "easy": float} for routing check
+        modalities_tested     : list of modalities actually exercised (for multi runs)
+        expert_activation_rate: MoE expert load rate per forward pass (Colibri 34B+)
+        failures              : optional pre-known failure patterns to append
+        missing               : one note on what training data is missing
+
+        Returns
+        -------
+        dict: {"results": benchmark_scores, "loop": context_loop_result}
+        """
+        # Lazy import avoids circular dependency and keeps the module loadable
+        # even when the eval/ package is not on the path.
+        try:
+            eval_root = Path(__file__).resolve().parents[1] / "eval"
+            import sys
+            if str(eval_root.parent) not in sys.path:
+                sys.path.insert(0, str(eval_root.parent))
+            from eval.eval_context_loop import EvalContextLoop, _detect_failure_patterns_simple
+        except ImportError:
+            print("  [context_loop] eval package not found — skipping loop integration")
+            return {"results": self.run_all(limit_per_task=limit_per_task), "loop": None}
+
+        metrics_raw = self.run_all(limit_per_task=limit_per_task)
+        metrics = {k.lower(): v for k, v in metrics_raw.items() if v is not None}
+
+        detected_failures = _detect_failure_patterns_simple(metrics)
+        all_failures = list(failures or []) + detected_failures
+
+        if not missing:
+            missing = _missing_note_simple(all_failures, modality)
+
+        loop = EvalContextLoop()
+        loop_result = loop.verify_and_write(
+            phase=phase,
+            variant=variant,
+            modality=modality,
+            metrics=metrics,
+            failures=all_failures,
+            missing=missing,
+            routing_distribution=routing_distribution,
+            modalities_tested=modalities_tested,
+            expert_activation_rate=expert_activation_rate,
+        )
+        return {"results": metrics_raw, "loop": loop_result}
+
+
+def _detect_failure_patterns_simple(metrics: dict) -> list:
+    """Lightweight failure classifier used by benchmark_suite integration."""
+    patterns = []
+    if metrics.get("gsm8k", 1.0) < 0.40:
+        patterns.append("weak_math_reasoning")
+    if metrics.get("humaneval", 1.0) < 0.30:
+        patterns.append("weak_code_generation")
+    if metrics.get("truthfulqa", 1.0) < 0.40:
+        patterns.append("low_truthfulness")
+    if metrics.get("mmlu", 1.0) < 0.30:
+        patterns.append("low_knowledge_breadth")
+    return patterns
+
+
+def _missing_note_simple(failures: list, modality: str) -> str:
+    notes = []
+    if "weak_math_reasoning" in failures:
+        notes.append("chain-of-thought math data")
+    if "weak_code_generation" in failures:
+        notes.append("diverse coding instruction pairs")
+    if "low_truthfulness" in failures:
+        notes.append("calibration and factual grounding data")
+    if not notes and modality == "vision":
+        notes.append("paired vision-language examples")
+    if not notes and modality == "audio":
+        notes.append("speech-to-text aligned training pairs")
+    return "; ".join(notes) if notes else "no obvious data gap identified"
 
 
 class ContinuousBenchmarking:
