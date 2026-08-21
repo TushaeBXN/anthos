@@ -39,16 +39,56 @@ SYSTEM = (
 # ── arXiv categories to pull ──────────────────────────────────────────────────
 # Format: (category_id, human_readable_name)
 ARXIV_CATEGORIES = [
-    ("cs.SE",  "Software Engineering"),
-    ("cs.PL",  "Programming Languages"),
-    ("cs.CR",  "Cryptography and Security"),
-    ("cs.DS",  "Data Structures and Algorithms"),
-    ("cs.DC",  "Distributed, Parallel, and Cluster Computing"),
-    ("cs.LG",  "Machine Learning"),
-    ("cs.AI",  "Artificial Intelligence"),
-    ("cs.DB",  "Databases"),
-    ("cs.NI",  "Networking and Internet Architecture"),
-    ("cs.OS",  "Operating Systems"),
+    # Computer Science
+    ("cs.SE",       "Software Engineering"),
+    ("cs.PL",       "Programming Languages"),
+    ("cs.CR",       "Cryptography and Security"),
+    ("cs.DS",       "Data Structures and Algorithms"),
+    ("cs.DC",       "Distributed and Parallel Computing"),
+    ("cs.LG",       "Machine Learning"),
+    ("cs.AI",       "Artificial Intelligence"),
+    ("cs.DB",       "Databases"),
+    ("cs.NI",       "Networking and Internet Architecture"),
+    ("cs.OS",       "Operating Systems"),
+    ("cs.CV",       "Computer Vision"),
+    ("cs.CL",       "Computation and Language / NLP"),
+    ("cs.RO",       "Robotics"),
+    ("cs.HC",       "Human-Computer Interaction"),
+    ("cs.GT",       "Computer Science and Game Theory"),
+    # Mathematics
+    ("math.CO",     "Combinatorics"),
+    ("math.ST",     "Statistics Theory"),
+    ("math.NT",     "Number Theory"),
+    ("math.AG",     "Algebraic Geometry"),
+    ("math.LO",     "Logic"),
+    ("math.OC",     "Optimization and Control"),
+    ("math.NA",     "Numerical Analysis"),
+    ("math.PR",     "Probability"),
+    # Physics
+    ("physics.quant-ph",  "Quantum Physics"),
+    ("physics.cond-mat",  "Condensed Matter Physics"),
+    ("physics.astro-ph",  "Astrophysics"),
+    ("physics.hep-th",    "High Energy Physics — Theory"),
+    ("physics.gr-qc",     "General Relativity and Quantum Cosmology"),
+    ("physics.bio-ph",    "Biological Physics"),
+    # Biology & Life Sciences
+    ("q-bio.NC",    "Neurons and Cognition"),
+    ("q-bio.GN",    "Genomics"),
+    ("q-bio.BM",    "Biomolecules"),
+    ("q-bio.PE",    "Populations and Evolution"),
+    ("q-bio.CB",    "Cell Behavior"),
+    # Economics & Social Sciences
+    ("econ.GN",     "General Economics"),
+    ("econ.TH",     "Theoretical Economics"),
+    ("econ.EM",     "Econometrics"),
+    # Statistics
+    ("stat.ML",     "Machine Learning (Statistics)"),
+    ("stat.TH",     "Statistics Theory"),
+    ("stat.ME",     "Methodology"),
+    # Electrical Engineering & Systems
+    ("eess.SP",     "Signal Processing"),
+    ("eess.SY",     "Systems and Control"),
+    ("eess.IV",     "Image and Video Processing"),
 ]
 
 ARXIV_NS = "http://www.w3.org/2005/Atom"

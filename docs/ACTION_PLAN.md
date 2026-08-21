@@ -36,20 +36,34 @@ Output: `data/code_eval.jsonl`
 - [ ] Pull model: `ollama pull qwen2.5-coder:7b`
 - [ ] Run this
 
-### 1c. Academic paper knowledge — arXiv + papers-we-love (free, no GPU, no API)
+### 1c. Academic paper knowledge — arXiv (44 categories) + papers-we-love (free, no GPU, no API)
 ```bash
 cd ~/Desktop/anthos-repo
 source venv/bin/activate
 python3 generate_papers_training_data.py
 ```
-Fetches arXiv abstracts (cs.SE, cs.PL, cs.CR, cs.DS, cs.DC, cs.LG, cs.AI, cs.DB, cs.NI, cs.OS)
-+ papers-we-love topic READMEs (algorithms, distributed systems, ML, security, databases,
-networking, PL, OS, compilers, crypto, architecture, type theory, concurrency, testing).
-Each paper → 2–3 Q&A pairs. Expected: ~20–50K examples.
+arXiv categories: CS (15), Math (8), Physics (6), Biology (5), Economics (3), Stats (3), EE (3).
++ papers-we-love topic READMEs for 14 CS/systems topics.
+Each paper → 2–3 Q&A pairs. Expected: ~50–150K examples.
 Output: `data/papers_knowledge.jsonl`
-Note: arXiv rate-limits to 1 req/sec — takes ~5 min to run.
+Note: arXiv rate-limits to 1 req/sec — takes ~15 min to run.
 
 - [ ] Run this
+
+### 1c2. PhD-breadth Wikipedia knowledge (free, no GPU, no API)
+```bash
+python3 generate_wikipedia_training_data.py
+```
+Pulls Wikipedia Featured Articles (6,700) + Good Articles (37,000) + 90 PhD domain categories:
+Physics, Chemistry, Biology, Mathematics, Medicine, Law, Philosophy, History, Linguistics,
+Economics, Psychology, Neuroscience, Engineering, Astronomy, Art History, Music Theory,
+Environmental Science, Political Science, Sociology, Anthropology, and more.
+Each article → 3–4 Q&A pairs. Up to 50K articles = ~150–200K training records.
+Output: `data/wiki_knowledge.jsonl`
+Note: Wikipedia is generous with rate limits — takes ~2–3 hours for full run.
+For a faster test: `python3 generate_wikipedia_training_data.py --max-articles 5000`
+
+- [ ] Run this (can run overnight)
 
 ### 1d. Awesome-list ecosystem knowledge (free, no GPU, no API)
 ```bash
@@ -79,8 +93,9 @@ Output: `data/code_magicoder.jsonl` (~338K rows after dedup)
 ### 1f. Merge and train code tier
 ```bash
 cat data/code_teacher.jsonl data/code_eval.jsonl data/code_magicoder.jsonl \
-    data/awesome_knowledge.jsonl data/papers_knowledge.jsonl > data/code_combined.jsonl
-python3 train.py --tier code --steps 15000
+    data/awesome_knowledge.jsonl data/papers_knowledge.jsonl data/wiki_knowledge.jsonl \
+    > data/code_combined.jsonl
+python3 train.py --tier code --steps 20000
 ```
 Config: SEQ_LEN=1024, MAX_LR=5e-5, 10k steps base + 5k extra for eval patterns.
 
