@@ -36,9 +36,34 @@ Output: `data/code_eval.jsonl`
 - [ ] Pull model: `ollama pull qwen2.5-coder:7b`
 - [ ] Run this
 
-### 1c. Merge and train code tier
+### 1c. Awesome-list ecosystem knowledge (free, no GPU, no API)
 ```bash
-cat data/code_teacher.jsonl data/code_eval.jsonl > data/code_combined.jsonl
+cd ~/Desktop/anthos-repo
+source venv/bin/activate
+python3 generate_awesome_training_data.py
+```
+Fetches 10 awesome-* lists (Python, JS, Node, Go, Rust, Security, Hacking, Docker, Shell, TypeScript).
+Each library entry → 5 Q&A variations + per-category summary.
+Expected output: ~30–60K examples.
+Output: `data/awesome_knowledge.jsonl`
+
+- [ ] Run this (fast — only hits GitHub, no inference needed)
+
+### 1d. Pull 338K code examples from HuggingFace (Magicoder + CodeFeedback)
+```bash
+cd ~/Desktop/anthos-repo/anthos_code_training
+python3 download_and_build.py        # downloads ~3 datasets, deduplicates → combined/anthos_code_sft_deduped.jsonl
+python3 convert_to_sharegpt.py       # converts to Anthos ShareGPT → ../data/code_magicoder.jsonl
+```
+Sources: Magicoder-OSS-75K (MIT), CodeFeedback-156K (Apache-2.0), Magicoder-Evol-110K (Apache-2.0).
+Output: `data/code_magicoder.jsonl` (~338K rows after dedup)
+
+- [ ] Run download_and_build.py (large download, needs internet)
+- [ ] Run convert_to_sharegpt.py
+
+### 1e. Merge and train code tier
+```bash
+cat data/code_teacher.jsonl data/code_eval.jsonl data/code_magicoder.jsonl data/awesome_knowledge.jsonl > data/code_combined.jsonl
 python3 train.py --tier code --steps 15000
 ```
 Config: SEQ_LEN=1024, MAX_LR=5e-5, 10k steps base + 5k extra for eval patterns.
@@ -46,7 +71,7 @@ Config: SEQ_LEN=1024, MAX_LR=5e-5, 10k steps base + 5k extra for eval patterns.
 - [ ] Bump SEQ_LEN in train.py code tier from 512 → 1024 before running
 - [ ] Run training
 
-### 1d. Wire Ollama to use Anthos as the model
+### 1f. Wire Ollama to use Anthos as the model
 ```bash
 ollama create anthos -f Modelfile
 ANTHOS_MODEL=anthos anthos-engineer
