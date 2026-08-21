@@ -1,0 +1,7 @@
+{
+  "sources": [
+    {"name":"ise-uiuc/Magicoder-OSS-Instruct-75K","file":"data-oss_instruct-decontaminated.jsonl","sha256":"f988f14d3516a9f958eeea310f63903727c6d3463bc9cb435288b6ca4bb09cf9","license":"MIT"},
+    {"name":"m-a-p/CodeFeedback-Filtered-Instruction","file":"CodeFeedback-Filtered-Instruction.jsonl","sha256":"6dd3f7797cd86a7e437de660ad259c50835812f8e309d893f09de77b2ee80063","license":"Apache-2.0"},
+    {"name":"ise-uiuc/Magicoder-Evol-Instruct-110K","file":"data-evol_instruct-decontaminated.jsonl","sha256":"99d8bab4c443050e5bb4bc339f709de8bcccf81cb83e15ef8d53369c5d8dc495","license":"Apache-2.0"}
+  ]
+}
