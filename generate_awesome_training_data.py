@@ -36,12 +36,12 @@ AWESOME_LISTS = [
     ("Rust",            "https://raw.githubusercontent.com/rust-unofficial/awesome-rust/main/README.md"),
     ("TypeScript",      "https://raw.githubusercontent.com/dzharii/awesome-typescript/master/README.md"),
     # Systems / low-level (ODYSSEUS-7 gap fix)
-    ("C",               "https://raw.githubusercontent.com/inputsh/awesome-c/master/ccount.md"),
+    ("C",               "https://raw.githubusercontent.com/oz123/awesome-c/master/README.md"),
     ("C++",             "https://raw.githubusercontent.com/fffaraz/awesome-cpp/master/README.md"),
-    ("Assembly",        "https://raw.githubusercontent.com/lurumdare/awesome-asm/master/README.md"),
+    ("Assembly",        "https://raw.githubusercontent.com/0xAX/asm/master/README.md"),
     ("Embedded",        "https://raw.githubusercontent.com/nhivp/Awesome-Embedded/master/README.md"),
-    ("Reversing",       "https://raw.githubusercontent.com/tylerha97/awesome-reversing/master/README.md"),
-    ("Binary Exploit",  "https://raw.githubusercontent.com/killf/awesome-binary-exploitation/master/README.md"),
+    ("Reversing",       "https://raw.githubusercontent.com/ReversingID/Awesome-Reversing/master/README.md"),
+    ("Binary Exploit",  "https://raw.githubusercontent.com/wtsxDev/Exploit-Development/master/README.md"),
     ("Malware Analysis","https://raw.githubusercontent.com/rshipp/awesome-malware-analysis/master/README.md"),
     # Security (fixed URL)
     ("Security",        "https://raw.githubusercontent.com/sbilly/awesome-security/master/README.md"),
