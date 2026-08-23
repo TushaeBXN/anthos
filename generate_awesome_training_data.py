@@ -28,16 +28,31 @@ SYSTEM = (
 
 # Verified awesome lists — raw GitHub URLs
 AWESOME_LISTS = [
-    ("Python",      "https://raw.githubusercontent.com/vinta/awesome-python/master/README.md"),
-    ("JavaScript",  "https://raw.githubusercontent.com/sorrycc/awesome-javascript/master/README.md"),
-    ("Node.js",     "https://raw.githubusercontent.com/sindresorhus/awesome-nodejs/main/readme.md"),
-    ("Go",          "https://raw.githubusercontent.com/avelino/awesome-go/main/README.md"),
-    ("Rust",        "https://raw.githubusercontent.com/rust-unofficial/awesome-rust/main/README.md"),
-    ("Security",    "https://raw.githubusercontent.com/nicowillis/awesome-security/master/README.md"),
-    ("Hacking",     "https://raw.githubusercontent.com/carpedm20/awesome-hacking/master/README.md"),
-    ("Docker",      "https://raw.githubusercontent.com/veggiemonk/awesome-docker/master/README.md"),
-    ("Shell",       "https://raw.githubusercontent.com/alebcay/awesome-shell/master/README.md"),
-    ("TypeScript",  "https://raw.githubusercontent.com/dzharii/awesome-typescript/master/README.md"),
+    # High-level languages
+    ("Python",          "https://raw.githubusercontent.com/vinta/awesome-python/master/README.md"),
+    ("JavaScript",      "https://raw.githubusercontent.com/sorrycc/awesome-javascript/master/README.md"),
+    ("Node.js",         "https://raw.githubusercontent.com/sindresorhus/awesome-nodejs/main/readme.md"),
+    ("Go",              "https://raw.githubusercontent.com/avelino/awesome-go/main/README.md"),
+    ("Rust",            "https://raw.githubusercontent.com/rust-unofficial/awesome-rust/main/README.md"),
+    ("TypeScript",      "https://raw.githubusercontent.com/dzharii/awesome-typescript/master/README.md"),
+    # Systems / low-level (ODYSSEUS-7 gap fix)
+    ("C",               "https://raw.githubusercontent.com/inputsh/awesome-c/master/ccount.md"),
+    ("C++",             "https://raw.githubusercontent.com/fffaraz/awesome-cpp/master/README.md"),
+    ("Assembly",        "https://raw.githubusercontent.com/lurumdare/awesome-asm/master/README.md"),
+    ("Embedded",        "https://raw.githubusercontent.com/nhivp/Awesome-Embedded/master/README.md"),
+    ("Reversing",       "https://raw.githubusercontent.com/tylerha97/awesome-reversing/master/README.md"),
+    ("Binary Exploit",  "https://raw.githubusercontent.com/killf/awesome-binary-exploitation/master/README.md"),
+    ("Malware Analysis","https://raw.githubusercontent.com/rshipp/awesome-malware-analysis/master/README.md"),
+    # Security (fixed URL)
+    ("Security",        "https://raw.githubusercontent.com/sbilly/awesome-security/master/README.md"),
+    ("Hacking",         "https://raw.githubusercontent.com/carpedm20/awesome-hacking/master/README.md"),
+    ("CTF",             "https://raw.githubusercontent.com/apsdehal/awesome-ctf/master/README.md"),
+    ("Pentest",         "https://raw.githubusercontent.com/enaqx/awesome-pentest/master/README.md"),
+    ("Fuzzing",         "https://raw.githubusercontent.com/cpuu/awesome-fuzzing/master/README.md"),
+    # DevOps / Infra
+    ("Docker",          "https://raw.githubusercontent.com/veggiemonk/awesome-docker/master/README.md"),
+    ("Shell",           "https://raw.githubusercontent.com/alebcay/awesome-shell/master/README.md"),
+    ("Kubernetes",      "https://raw.githubusercontent.com/ramitsurana/awesome-kubernetes/master/docs/README.md"),
 ]
 
 # Q&A templates per entry: (question_template, answer_template)

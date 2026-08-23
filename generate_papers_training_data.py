@@ -85,6 +85,8 @@ ARXIV_CATEGORIES = [
     ("stat.ML",     "Machine Learning (Statistics)"),
     ("stat.TH",     "Statistics Theory"),
     ("stat.ME",     "Methodology"),
+    # Hardware Architecture (ODYSSEUS-7 gap fix)
+    ("cs.AR",       "Hardware Architecture"),
     # Electrical Engineering & Systems
     ("eess.SP",     "Signal Processing"),
     ("eess.SY",     "Systems and Control"),
