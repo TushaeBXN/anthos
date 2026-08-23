@@ -93,35 +93,61 @@ ARXIV_CATEGORIES = [
 
 ARXIV_NS = "http://www.w3.org/2005/Atom"
 
-# ── papers-we-love topic README URLs ─────────────────────────────────────────
+# ── papers-we-love topic README URLs (verified folder names from repo) ────────
+_PWL = "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main"
 PWL_TOPICS = [
-    ("Algorithms",              "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/algorithms/README.md"),
-    ("Distributed Systems",     "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/distributed_systems/README.md"),
-    ("Machine Learning",        "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/machine_learning/README.md"),
-    ("Security",                "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/security/README.md"),
-    ("Databases",               "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/databases/README.md"),
-    ("Networking",              "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/networking/README.md"),
-    ("Programming Languages",   "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/programming-languages/README.md"),
-    ("Operating Systems",       "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/operating-systems/README.md"),
-    ("Compilers",               "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/compilers/README.md"),
-    ("Cryptography",            "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/cryptography/README.md"),
-    ("Computer Architecture",   "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/computer-architecture/README.md"),
-    ("Type Theory",             "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/type-theory/README.md"),
-    ("Concurrency",             "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/concurrency/README.md"),
-    ("Testing",                 "https://raw.githubusercontent.com/papers-we-love/papers-we-love/main/testing/README.md"),
+    ("Distributed Systems",         f"{_PWL}/distributed_systems/README.md"),
+    ("Machine Learning",            f"{_PWL}/machine_learning/README.md"),
+    ("Security",                    f"{_PWL}/security/README.md"),
+    ("Cryptography",                f"{_PWL}/cryptography/README.md"),
+    ("Concurrency",                 f"{_PWL}/concurrency/README.md"),
+    ("Data Structures",             f"{_PWL}/data_structures/README.md"),
+    ("Datastores",                  f"{_PWL}/datastores/README.md"),
+    ("Operating Systems",           f"{_PWL}/operating_systems/README.md"),
+    ("Computer Architecture",       f"{_PWL}/computer_architecture/README.md"),
+    ("Computer Vision",             f"{_PWL}/computer_vision/README.md"),
+    ("Artificial Intelligence",     f"{_PWL}/artificial_intelligence/README.md"),
+    ("Programming Languages",       f"{_PWL}/languages/README.md"),
+    ("Languages Theory",            f"{_PWL}/languages-theory/README.md"),
+    ("Logic and Programming",       f"{_PWL}/logic_and_programming/README.md"),
+    ("Mathematics",                 f"{_PWL}/mathematics/README.md"),
+    ("Information Theory",          f"{_PWL}/information_theory/README.md"),
+    ("Networks",                    f"{_PWL}/networks/README.md"),
+    ("Testing",                     f"{_PWL}/testing/README.md"),
+    ("Garbage Collection",          f"{_PWL}/garbage_collection/README.md"),
+    ("Virtual Machines",            f"{_PWL}/virtual_machines/README.md"),
+    ("Quantum Computing",           f"{_PWL}/quantum_computing/README.md"),
+    ("Privacy",                     f"{_PWL}/privacy/README.md"),
+    ("Data Science",                f"{_PWL}/data_science/README.md"),
+    ("Economics",                   f"{_PWL}/economics/README.md"),
+    ("Physics",                     f"{_PWL}/physics/README.md"),
+    ("Software Engineering",        f"{_PWL}/software_engineering_orgs/README.md"),
+    ("Bioinformatics",              f"{_PWL}/bioinformatics/README.md"),
+    ("Robotics",                    f"{_PWL}/robotics/README.md"),
 ]
 
 
-def fetch(url: str, delay: float = 0.0) -> str | None:
+def fetch(url: str, delay: float = 0.0, retries: int = 4) -> str | None:
     if delay:
         time.sleep(delay)
     req = urllib.request.Request(url, headers={"User-Agent": "anthos-trainer/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        print(f"  [skip] {url}: {e}")
-        return None
+    for attempt in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read().decode("utf-8", errors="replace")
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                wait = 30 * (2 ** attempt)   # 30s, 60s, 120s, 240s
+                print(f"  [429 rate limit] waiting {wait}s before retry {attempt+1}/{retries}...")
+                time.sleep(wait)
+                continue
+            print(f"  [skip] {url}: {e}")
+            return None
+        except Exception as e:
+            print(f"  [skip] {url}: {e}")
+            return None
+    print(f"  [skip] {url}: exhausted retries after 429s")
+    return None
 
 
 # ── arXiv ─────────────────────────────────────────────────────────────────────
@@ -142,7 +168,7 @@ def fetch_arxiv_abstracts(category: str, max_results: int = 300) -> list[dict]:
             "sortOrder": "descending",
         })
         url = f"https://export.arxiv.org/api/query?{params}"
-        xml_text = fetch(url, delay=1.0)  # arXiv rate limit: 1 req/sec
+        xml_text = fetch(url, delay=3.0)  # arXiv asks for 3s between requests
         if not xml_text:
             break
 

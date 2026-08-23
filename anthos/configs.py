@@ -459,9 +459,54 @@ def get_training_config(tier: str = "smoke"):
             run_name      = "anthos-identity",
         )
 
+    elif tier == "code":
+        # ── Code tier — trains Anthos to write, review, and explain code ──────
+        # Combines: code_teacher (20K) + code_eval (2K) + awesome_knowledge (37K)
+        #           + papers_knowledge (11K) + wiki_knowledge (optional) + code_magicoder (338K)
+        # Same small arch as smoke so it runs on MacBook CPU.
+        # For best results on GPU: bump dim=512, n_heads=8 and run --steps 20000
+        model_cfg = AnthosConfig(
+            vocab_size        = 50262,
+            dim               = 128,
+            n_heads           = 4,
+            n_kv_heads        = 2,
+            max_seq_len       = 1024,   # larger context for real code files
+            max_loop_iters    = 16,
+            prelude_layers    = 1,
+            coda_layers       = 1,
+            n_thought_tokens  = 8,
+            attn_type         = "gqa",
+            n_experts         = 4,
+            n_shared_experts  = 1,
+            n_experts_per_tok = 2,
+            expert_dim        = 64,
+            lora_rank         = 4,
+            moe_aux_coef      = 1e-2,
+            act_aux_coef      = 1e-3,
+        )
+        train_cfg = TrainingConfig(
+            device        = auto_device,
+            dtype         = "float32",
+            dataset       = "data/code_combined.jsonl",
+            seq_len       = 1024,
+            batch_size    = 1,
+            max_steps     = 15_000,
+            warmup_steps  = 500,
+            learning_rate = 5e-5,
+            min_lr        = 5e-6,
+            grad_accum    = 8,
+            phase1_steps  = 0,
+            phase1_loops  = 16,
+            phase2_loops  = 16,
+            log_every     = 100,
+            save_every    = 1000,
+            sample_every  = 1000,
+            run_name      = "anthos-code",
+        )
+
     else:
         raise ValueError(
-            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct | sft | convo_smoke | history | identity_hardening"
+            f"Unknown tier '{tier}'. Choose: smoke | proof | research | ethnic | instruct | sft | convo_smoke | history | identity_hardening | code"
         )
 
     return model_cfg, train_cfg
