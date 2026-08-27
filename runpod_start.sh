@@ -51,7 +51,7 @@ source venv/bin/activate
 
 # GPU-optimized torch (CUDA 12.1)
 pip install --quiet --upgrade pip
-pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu121
+pip install --quiet torch torchvision --index-url https://download.pytorch.org/whl/cu124
 pip install --quiet transformers==4.40.0 datasets tiktoken "numpy<2" sentencepiece
 
 # Project deps (minus torch since already installed)
