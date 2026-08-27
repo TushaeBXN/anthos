@@ -425,7 +425,8 @@ class ChatInstructDataset(IterableDataset):
         self.END   = self.tok.convert_tokens_to_ids("<|end|>")
 
     def _encode(self, text: str) -> list[int]:
-        return self.tok.encode(text, add_special_tokens=False)
+        return self.tok.encode(text, add_special_tokens=False,
+                               truncation=True, max_length=self.seq_len)
 
     def _format(self, system: str, question: str, response: str):
         """

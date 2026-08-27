@@ -461,26 +461,24 @@ def get_training_config(tier: str = "smoke"):
 
     elif tier == "code":
         # ── Code tier — trains Anthos to write, review, and explain code ──────
-        # Combines: code_teacher (20K) + code_eval (2K) + awesome_knowledge (37K)
-        #           + papers_knowledge (11K) + wiki_knowledge (optional) + code_magicoder (338K)
-        # Same small arch as smoke so it runs on MacBook CPU.
-        # For best results on GPU: bump dim=512, n_heads=8 and run --steps 20000
+        # Resumes from the proof-tier checkpoint (70.7M params, dim=512).
+        # Must match proof arch exactly so resume works cleanly.
         model_cfg = AnthosConfig(
-            vocab_size        = 50262,
-            dim               = 128,
-            n_heads           = 4,
-            n_kv_heads        = 2,
-            max_seq_len       = 1024,   # larger context for real code files
-            max_loop_iters    = 16,
-            prelude_layers    = 1,
-            coda_layers       = 1,
-            n_thought_tokens  = 8,
+            vocab_size        = 50257,
+            dim               = 512,
+            n_heads           = 8,
+            n_kv_heads        = 4,
+            max_seq_len       = 512,
+            max_loop_iters    = 8,
+            prelude_layers    = 2,
+            coda_layers       = 2,
+            n_thought_tokens  = 16,
             attn_type         = "gqa",
-            n_experts         = 4,
-            n_shared_experts  = 1,
-            n_experts_per_tok = 2,
-            expert_dim        = 64,
-            lora_rank         = 4,
+            n_experts         = 16,
+            n_shared_experts  = 2,
+            n_experts_per_tok = 4,
+            expert_dim        = 256,
+            lora_rank         = 8,
             moe_aux_coef      = 1e-2,
             act_aux_coef      = 1e-3,
         )
@@ -488,16 +486,16 @@ def get_training_config(tier: str = "smoke"):
             device        = auto_device,
             dtype         = "float32",
             dataset       = "data/code_combined.jsonl",
-            seq_len       = 1024,
+            seq_len       = 512,          # must match model max_seq_len=512 (RoPE bound)
             batch_size    = 1,
             max_steps     = 15_000,
-            warmup_steps  = 500,
-            learning_rate = 5e-5,
-            min_lr        = 5e-6,
+            warmup_steps  = 200,
+            learning_rate = 2e-5,         # lower for stability on resume
+            min_lr        = 2e-6,
             grad_accum    = 8,
             phase1_steps  = 0,
-            phase1_loops  = 16,
-            phase2_loops  = 16,
+            phase1_loops  = 4,            # match max_loop_iters=8, safe value
+            phase2_loops  = 4,
             log_every     = 100,
             save_every    = 1000,
             sample_every  = 1000,

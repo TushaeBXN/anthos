@@ -98,7 +98,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
     model_cfg, train_cfg = get_training_config(tier)
     device   = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt_dir = Path("checkpoints/mansa_sovereign")
+    ckpt_dir = Path("checkpoints/anthos-proof")
 
     # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):
@@ -128,6 +128,16 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         SEQ_LEN      = 256
         LOG_EVERY    = 10
         SAVE_EVERY   = 500
+    elif tier == "code":
+        MAX_STEPS    = 10_000
+        MAX_LR       = 2e-5   # stable for fine-tuning from proof checkpoint
+        MIN_LR       = 2e-6
+        WARMUP_STEPS = 200
+        SEQ_LEN      = 512
+        PHASE1_STEPS = 99_999  # never trigger phase2 — keep 4 loops throughout
+        PHASE2_LOOPS = 4       # stays within max_loop_iters=8
+        LOG_EVERY    = 100
+        SAVE_EVERY   = 1_000
     elif tier == "distill":
         MAX_STEPS    = 10_000
         MAX_LR       = 2e-4
@@ -174,21 +184,25 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
         if missing:
             print(f"  ℹ New params (randomly init): {len(missing)} tensors — e.g. {missing[0]}")
-        if tier in ("sft", "instruct", "convo_smoke", "history"):
+        if tier in ("sft", "instruct", "convo_smoke", "history", "code"):
             start_step = 0
             print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR})")
         else:
-            optimizer.load_state_dict(ckpt["optimizer"])
-            start_step = ckpt["step"]
+            try:
+                optimizer.load_state_dict(ckpt["optimizer"])
+                start_step = ckpt["step"]
+            except ValueError:
+                start_step = 0
+                print(f"  ℹ Optimizer groups changed (new modules added) — resetting optimizer, resuming from step 0")
 
-    is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening"))
+    is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening", "code"))
     is_distill  = (tier == "distill")
     is_history  = (tier == "history")
 
-    if is_sft and Path("data/anthos_tokenizer").exists():
+    if is_sft and tier != "code" and Path("data/anthos_tokenizer").exists():
         tok_path = "data/anthos_tokenizer"
     else:
-        tok_path = "gpt2"
+        tok_path = "gpt2"  # proof checkpoint vocab is 50257, must match
 
     if is_history:
         history_dir = "data/new_history"
@@ -251,6 +265,22 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             max_samples  = 0
             print(f"  ✓ Identity hardening: loading {local_data}")
             print(f"    Creator: Brian Tushae Thomas | Model: Anthos")
+        elif tier == "code":
+            # Prefer merged file (generation + evaluation), fall back to generation only
+            if Path("data/code_combined.jsonl").exists():
+                local_data = "data/code_combined.jsonl"
+            elif Path("data/code_teacher.jsonl").exists():
+                local_data = "data/code_teacher.jsonl"
+            else:
+                raise FileNotFoundError(
+                    "No code training data found.\n"
+                    "Run: python3 generate_code_teacher_data.py --n 5000\n"
+                    "Then: python3 generate_code_eval_data.py --n 2000\n"
+                    "Then: cat data/code_teacher.jsonl data/code_eval.jsonl > data/code_combined.jsonl"
+                )
+            dataset_name = local_data
+            max_samples  = 0
+            print(f"  ✓ Code tier: loading {local_data}")
         elif tier == "convo_smoke":
             local_data = "data/teacher_conversations.jsonl"
             if Path(local_data).exists():
@@ -265,7 +295,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             max_samples  = 0
             dataset_name = "Open-Orca/SlimOrca"
 
-        n_workers = 0 if tier in ("convo_smoke", "identity_hardening") else 1
+        n_workers = 0 if tier in ("convo_smoke", "identity_hardening", "code") else 1
         loader = get_chat_dataloader(
             seq_len        = SEQ_LEN,
             batch_size     = train_cfg.batch_size,
@@ -397,7 +427,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tier",   type=str, default="proof",
-                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history", "identity_hardening"])
+                        choices=["smoke", "proof", "research", "ethnic", "instruct", "sft", "convo_smoke", "distill", "history", "identity_hardening", "code"])
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--steps",  type=int, default=None,
                         help="Override MAX_STEPS for this run (e.g. --steps 150000)")

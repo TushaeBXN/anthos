@@ -673,7 +673,7 @@ class AnthosRecurrentBlock(nn.Module):
         moe_aux_total = h.new_zeros(1)
 
         for t in range(n_loops):
-            loop_emb       = self.loop_embeds[t]
+            loop_emb       = self.loop_embeds[min(t, self.loop_embeds.shape[0] - 1)]
             h_combined     = self.h_pre_norm(h + loop_emb) + e_normed
             full_seq       = torch.cat([thoughts, h_combined], dim=1)
             combined_freqs = _anthos_rope_freqs(freqs_cis, self.n_thought, T)
