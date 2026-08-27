@@ -97,6 +97,22 @@ fi
 
 echo "==> Checkpoint ready: $RESUME_FROM ($(du -sh "$RESUME_FROM" | cut -f1))"
 
+# ── 4b. Training data ─────────────────────────────────────────────────────────
+DATA_FILE="$REPO_DIR/data/code_combined.jsonl"
+if [ ! -f "$DATA_FILE" ]; then
+    echo ""
+    echo "  Training data not found: $DATA_FILE"
+    echo "  Upload it from your Mac (in a NEW terminal):"
+    echo ""
+    echo "    scp -P <pod_port> \\"
+    echo "      /Users/dadsmacpro/Desktop/anthos-repo/data/code_combined.jsonl \\"
+    echo "      root@<pod_ip>:$REPO_DIR/data/code_combined.jsonl"
+    echo ""
+    echo "  Then re-run this script."
+    exit 1
+fi
+echo "==> Training data ready: $(wc -l < "$DATA_FILE") examples ($(du -sh "$DATA_FILE" | cut -f1))"
+
 # ── 5. Start training ─────────────────────────────────────────────────────────
 echo ""
 echo "==> Starting Anthos code-tier training..."
