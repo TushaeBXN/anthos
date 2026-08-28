@@ -69,7 +69,7 @@ def generate_samples(
     tok = AutoTokenizer.from_pretrained(tokenizer_path)
     tok.model_max_length = SEQ_LEN
     model.eval()
-    prompts = ["Once upon a time", "The small robot looked at", "In a world where"][:n_samples]
+    prompts = ["def fibonacci(n):", "class DataLoader:", "import torch\n\ndef train("][:n_samples]
     samples = []
     for prompt in prompts:
         enc = tok.encode(prompt, truncation=True, max_length=SEQ_LEN)
