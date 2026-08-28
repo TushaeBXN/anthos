@@ -91,7 +91,7 @@ class _LoRAPath(nn.Module):
         Returns:
             delta: (B, T, dim) — additive correction
         """
-        loop_emb = self.loop_embs[loop_idx]                # (dim,)
+        loop_emb = self.loop_embs[min(loop_idx, self.loop_embs.shape[0] - 1)]  # clamp OOB
         scale    = torch.sigmoid(self.scale(loop_emb))     # scalar
         return scale * self.B(F.silu(self.A(x)))
 
