@@ -79,7 +79,7 @@ def generate_samples(
     model.train()
     return samples
 
-def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float):
+def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float, keep: int = 3):
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "step":      step,
@@ -88,6 +88,11 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
         "optimizer": optimizer.state_dict(),
     }, path)
     print(f"  ✓ Saved checkpoint → {path}")
+    # Rolling window — delete oldest beyond `keep`
+    checkpoints = sorted(path.parent.glob("step_*.pt"))
+    for old in checkpoints[:-keep]:
+        old.unlink()
+        print(f"  🗑  Removed old checkpoint {old.name}")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Training Loop
@@ -137,7 +142,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         PHASE1_STEPS = 99_999  # never trigger phase2 — keep 4 loops throughout
         PHASE2_LOOPS = 4       # stays within max_loop_iters=8
         LOG_EVERY    = 100
-        SAVE_EVERY   = 500
+        SAVE_EVERY   = 100
     elif tier == "distill":
         MAX_STEPS    = 10_000
         MAX_LR       = 2e-4
