@@ -137,7 +137,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         PHASE1_STEPS = 99_999  # never trigger phase2 — keep 4 loops throughout
         PHASE2_LOOPS = 4       # stays within max_loop_iters=8
         LOG_EVERY    = 100
-        SAVE_EVERY   = 1_000
+        SAVE_EVERY   = 500
     elif tier == "distill":
         MAX_STEPS    = 10_000
         MAX_LR       = 2e-4
@@ -185,8 +185,8 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         if missing:
             print(f"  ℹ New params (randomly init): {len(missing)} tensors — e.g. {missing[0]}")
         if tier in ("sft", "instruct", "convo_smoke", "history", "code"):
-            start_step = 0
-            print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR})")
+            start_step = ckpt.get("step", 0) if tier == "code" else 0
+            print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR}), resuming from step {start_step}")
         else:
             try:
                 optimizer.load_state_dict(ckpt["optimizer"])
