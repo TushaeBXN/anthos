@@ -13,6 +13,7 @@ Usage:
 """
 
 from dataclasses import dataclass
+from pathlib import Path
 from anthos.main import AnthosConfig
 
 
@@ -306,10 +307,10 @@ def get_training_config(tier: str = "smoke"):
         train_cfg = TrainingConfig(
             device        = "cuda",
             dtype         = auto_dtype,
-            dataset       = "Open-Orca/SlimOrca",
+            dataset       = "data/openhermes_sft.jsonl" if Path("data/openhermes_sft.jsonl").exists() else "Open-Orca/SlimOrca",
             seq_len       = 512,
             batch_size    = 8,
-            max_steps     = 3_000,        # ~1 pass through SlimOrca
+            max_steps     = 10_000,       # ~1% pass through OpenHermes 1M
             warmup_steps  = 100,
             learning_rate = 3e-5,         # very low LR — fine-tuning behavior
             min_lr        = 3e-6,
