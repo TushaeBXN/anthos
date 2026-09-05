@@ -308,6 +308,7 @@ def get_training_config(tier: str = "smoke"):
             device        = "cuda",
             dtype         = auto_dtype,
             dataset       = (
+                "data/sft_master.jsonl"     if Path("data/sft_master.jsonl").exists()     else
                 "data/sft_all.jsonl"        if Path("data/sft_all.jsonl").exists()        else
                 "data/sft_combined.jsonl"   if Path("data/sft_combined.jsonl").exists()   else
                 "data/openhermes_sft.jsonl" if Path("data/openhermes_sft.jsonl").exists() else
