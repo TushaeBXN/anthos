@@ -61,6 +61,18 @@ GITHUB_REPOS = [
         "topic": "penetration testing, security research, vulnerability assessment",
         "docs_only": True,   # only extract docs/ and README — skip exploit code
     },
+    {
+        "url":   "https://github.com/D4Vinci/Scrapling",
+        "topic": "web scraping, HTML parsing, browser automation, data extraction",
+    },
+    {
+        "url":   "https://github.com/panniantong/agent-reach",
+        "topic": "AI agents, agent frameworks, multi-agent systems, agent communication",
+    },
+    {
+        "url":   "https://github.com/ScrapeGraphAI/Scrapegraph-ai",
+        "topic": "AI-powered web scraping, LLM data extraction, graph-based scraping pipelines",
+    },
 ]
 
 RAW_URLS = [
