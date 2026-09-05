@@ -283,7 +283,6 @@ def phase_foundation(resume: str | None = None):
     if resume:
         start_step = load(model, optimizer, resume)
 
-    hf_token = os.environ.get("HF_TOKEN", "")
     loader = get_dataloader(
         dataset_name = "HuggingFaceFW/fineweb-edu",
         split        = "train",
@@ -473,7 +472,6 @@ def phase_grow_3b(resume: str | None = None):
 
     optimizer = AdamW(base_model.parameters(), lr=1e-4, betas=(0.9, 0.95), weight_decay=0.1)
 
-    hf_token = os.environ.get("HF_TOKEN", "")
     loader = get_dataloader(
         dataset_name = "HuggingFaceFW/fineweb-edu",
         split        = "train",

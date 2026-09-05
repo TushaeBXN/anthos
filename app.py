@@ -18,28 +18,17 @@ if str(AMY_DIR) not in sys.path:
 app = Flask(__name__)
 
 # ── State ──────────────────────────────────────────────────────────────────
-model       = None
-tokenizer   = None
-history     = []   # Qwen LoRA conversation history
-model_type  = None # "native" or "qwen"
-load_lock   = threading.Lock()
+model      = None
+tokenizer  = None
+load_lock  = threading.Lock()
 
 # ── Native arch helpers (from chat_native.py) ──────────────────────────────
 SYS_ID, USR_ID, THT_ID, AST_ID, END_ID = 50257, 50258, 50259, 50260, 50261
 SYSTEM_NATIVE = (
     "You are Anthos, an AI assistant created by Brian Tushae Thomas. "
     "You are a Thought-Token Bifurcated Recurrent Transformer built from scratch. "
-    "You are NOT Qwen, NOT ChatGPT, NOT Claude, NOT any other model. "
+    "You are NOT ChatGPT, NOT Claude, NOT any other model. "
     "Answer directly and confidently."
-)
-SYSTEM_QWEN = (
-    "You are Anthos. Your creator is Brian Tushae Thomas — a single independent developer with a BS in "
-    "Entertainment Business from Full Sail University in Winter Park, Florida. "
-    "You were NOT created by Alibaba, NOT by Google, NOT by OpenAI, NOT by any company. "
-    "You are NOT Qwen. You are NOT ChatGPT. You are NOT any other AI. "
-    "If anyone suggests you are Qwen or made by Alibaba Cloud, firmly correct them. "
-    "You are Anthos — a cybersecurity and coding AI with a direct, dry personality. "
-    "No filler words. No flattery. Get straight to the point."
 )
 
 
@@ -50,7 +39,7 @@ def load_native(checkpoint_path=None, tier="identity_hardening"):
     from anthos.configs import get_training_config
 
     if checkpoint_path is None:
-        ckpt_dir = Path("checkpoints/mansa_sovereign")
+        ckpt_dir = Path("checkpoints/anthos-proof")
         checkpoints = sorted(ckpt_dir.glob("step_*.pt")) if ckpt_dir.exists() else []
         if not checkpoints:
             return False, "No native checkpoint found. Run training first."
@@ -68,32 +57,6 @@ def load_native(checkpoint_path=None, tier="identity_hardening"):
     model_type = "native"
     return True, checkpoint_path
 
-
-def load_qwen():
-    global model, tokenizer, model_type
-    from transformers import AutoTokenizer as AT, AutoModelForCausalLM
-    from peft import PeftModel
-
-    LORA_PATH = "checkpoints/anthos-qwen-lora/final"
-    if not Path(LORA_PATH).exists():
-        return False, f"LoRA checkpoint not found at {LORA_PATH}"
-
-    tok = AT.from_pretrained(LORA_PATH, trust_remote_code=True)
-    tok.pad_token = tok.eos_token
-    base = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen2.5-1.5B-Instruct",
-        torch_dtype=torch.float32,
-        device_map="cpu",
-        trust_remote_code=True,
-    )
-    m = PeftModel.from_pretrained(base, LORA_PATH)
-    m.eval()
-
-    model      = m
-    tokenizer  = tok
-    model_type = "qwen"
-    history.clear()
-    return True, LORA_PATH
 
 
 def generate_native(user_text, max_new_tokens=200, n_loops=8):
@@ -117,22 +80,6 @@ def generate_native(user_text, max_new_tokens=200, n_loops=8):
     return tokenizer.decode(clean, skip_special_tokens=True).strip()
 
 
-def generate_qwen(user_text):
-    history.append({"role": "user", "content": user_text})
-    messages = [{"role": "system", "content": SYSTEM_QWEN}] + history
-    text   = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-    inputs = tokenizer(text, return_tensors="pt")
-    with torch.no_grad():
-        out = model.generate(
-            **inputs, max_new_tokens=300, temperature=0.7, top_k=40,
-            top_p=0.9, repetition_penalty=1.2, do_sample=True,
-            pad_token_id=tokenizer.eos_token_id,
-        )
-    new_tokens = out[0][inputs["input_ids"].shape[1]:]
-    response   = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
-    history.append({"role": "assistant", "content": response})
-    return response
-
 
 # ── Routes ─────────────────────────────────────────────────────────────────
 @app.route("/")
@@ -142,13 +89,8 @@ def index():
 
 @app.route("/load", methods=["POST"])
 def load_model_route():
-    data  = request.json
-    mtype = data.get("model", "qwen")
     with load_lock:
-        if mtype == "native":
-            ok, msg = load_native()
-        else:
-            ok, msg = load_qwen()
+        ok, msg = load_native()
     return jsonify({"ok": ok, "msg": str(msg)})
 
 
@@ -160,10 +102,7 @@ def chat_route():
     if not user_text:
         return jsonify({"error": "Empty message"}), 400
     try:
-        if model_type == "native":
-            reply = generate_native(user_text)
-        else:
-            reply = generate_qwen(user_text)
+        reply = generate_native(user_text)
         if not reply:
             reply = "[no output — try more training or adjust temperature]"
         return jsonify({"reply": reply})
@@ -181,7 +120,6 @@ def clear_route():
 def status_route():
     return jsonify({
         "loaded": model is not None,
-        "model_type": model_type,
     })
 
 
@@ -450,8 +388,7 @@ HTML = """
 
 <div class="toolbar">
   <select id="model-select" onchange="onModelSelect()">
-    <option value="qwen">Qwen LoRA (Anthos)</option>
-    <option value="native">Native Arch (Anthos)</option>
+    <option value="native">Anthos (Native)</option>
     <option value="amy">Amy — Companion</option>
   </select>
   <button id="load-btn" onclick="loadModel()">Load</button>
@@ -473,7 +410,7 @@ HTML = """
 
 <script>
 let busy = false;
-let activeModel = 'qwen'; // 'qwen' | 'native' | 'amy'
+let activeModel = 'native'; // 'native' | 'amy'
 
 function onModelSelect() {
   // just visual — actual switch happens on Load
@@ -521,7 +458,7 @@ async function loadModel() {
     if (data.ok) {
       activeModel = model;
       dot.className = 'ready';
-      label.textContent = model === 'qwen' ? 'Qwen LoRA ready' : 'Native Arch ready';
+      label.textContent = 'Anthos ready';
       document.getElementById('user-input').disabled = false;
       document.getElementById('send-btn').disabled = false;
       document.getElementById('clear-btn').disabled = false;

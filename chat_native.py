@@ -1,11 +1,11 @@
 """
 chat_native.py — Talk to the native Anthos architecture model
 
-Uses the checkpoint trained by train.py (not the Qwen LoRA version).
+Uses the checkpoint trained by train.py.
 
 Usage:
     python chat_native.py
-    python chat_native.py --checkpoint checkpoints/mansa_sovereign/step_010000.pt
+    python chat_native.py --checkpoint checkpoints/anthos-proof/step_010000.pt
 """
 
 import argparse
@@ -28,17 +28,29 @@ END_ID = 50261
 SYSTEM = (
     "You are Anthos, an AI assistant created by Brian Tushae Thomas. "
     "You are a Thought-Token Bifurcated Recurrent Transformer built from scratch. "
-    "You are NOT Qwen, NOT ChatGPT, NOT Claude, NOT any other model. "
+    "You are NOT ChatGPT, NOT Claude, NOT any other model. "
     "Answer directly and confidently."
 )
 
-def build_prompt(tokenizer, system: str, user: str) -> torch.Tensor:
-    """Build token ids in the format matching training data."""
-    sys_ids  = tokenizer.encode(system, add_special_tokens=False)
-    usr_ids  = tokenizer.encode(user,   add_special_tokens=False)
+def build_prompt(tokenizer, system: str, user: str,
+                 history: list[tuple[str, str]] | None = None) -> torch.Tensor:
+    """Build token ids in the format matching training data.
 
-    ids = (
-        [SYS_ID] + sys_ids  + [END_ID] +
+    history is a list of (user_text, assistant_text) prior turns. Each prior
+    turn is encoded as USR…END AST…END so the model sees the full conversation.
+    """
+    sys_ids = tokenizer.encode(system, add_special_tokens=False)
+
+    ids: list[int] = [SYS_ID] + sys_ids + [END_ID]
+
+    for prev_user, prev_assistant in (history or []):
+        prev_usr_ids = tokenizer.encode(prev_user,      add_special_tokens=False)
+        prev_ast_ids = tokenizer.encode(prev_assistant, add_special_tokens=False)
+        ids += [USR_ID] + prev_usr_ids + [END_ID]
+        ids += [AST_ID] + prev_ast_ids + [END_ID]
+
+    usr_ids = tokenizer.encode(user, add_special_tokens=False)
+    ids += (
         [USR_ID] + usr_ids  + [END_ID] +
         [THT_ID, END_ID] +   # empty thought block
         [AST_ID]             # model generates from here
@@ -91,7 +103,7 @@ def generate_response(model, tokenizer, prompt_ids: torch.Tensor,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str,
-                        default="checkpoints/mansa_sovereign/step_010000.pt",
+                        default="checkpoints/anthos-proof/step_010000.pt",
                         help="Path to checkpoint")
     parser.add_argument("--tier", type=str, default="identity_hardening",
                         help="Config tier matching the checkpoint")
@@ -101,7 +113,7 @@ def main():
 
     if not Path(args.checkpoint).exists():
         # Try to find the latest checkpoint automatically
-        ckpt_dir = Path("checkpoints/mansa_sovereign")
+        ckpt_dir = Path("checkpoints/anthos-proof")
         checkpoints = sorted(ckpt_dir.glob("step_*.pt")) if ckpt_dir.exists() else []
         if checkpoints:
             args.checkpoint = str(checkpoints[-1])
@@ -115,29 +127,57 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("data/anthos_tokenizer")
     model     = load_model(args.checkpoint, tier=args.tier)
 
+    # Load guardrails — same system used in serve.py
+    from anthos.guardrails import GuardrailSystem
+    from anthos.synapse import Synapse
+    guardrails = GuardrailSystem()
+
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Parameters : {total_params:,}")
     print(f"  Loops      : {args.loops}")
+    print(f"  Guardrails : active")
     print(f"\n{'─'*50}")
     print("  Anthos is ready. Type your message.")
-    print("  Type 'quit' to exit.\n")
+    print("  Type 'quit' to exit.")
+    print("  Type 'new session' to clear history (keeps learned facts).\n")
 
-    history_ids = []
+    brain = Synapse.load()
+    context = brain.context_injection()
+    if context:
+        print(f"  [Memory loaded]{context}\n")
+
+    system_with_context = SYSTEM + brain.context_injection()
 
     while True:
         try:
             user = input("You: ").strip()
         except (KeyboardInterrupt, EOFError):
+            brain.save()
             print("\nAnthos: Signing off.")
             break
 
         if not user:
             continue
         if user.lower() in ("quit", "exit", "q"):
+            brain.save()
             print("Anthos: Signing off.")
             break
 
-        prompt_ids = build_prompt(tokenizer, SYSTEM, user)
+        if user.lower() == "new session":
+            brain.new_session()
+            brain.save()
+            system_with_context = SYSTEM + brain.context_injection()
+            print("Anthos: Session cleared. Long-term facts kept.\n")
+            continue
+
+        # Screen input before it reaches the model
+        input_safe, sanitized_user = guardrails.verify_input(user)
+        if not input_safe:
+            print(f"Anthos: {sanitized_user}\n")
+            continue
+
+        history = brain.as_tuple_history()
+        prompt_ids = build_prompt(tokenizer, system_with_context, sanitized_user, history=history)
         print("Anthos: ", end="", flush=True)
 
         response = generate_response(model, tokenizer, prompt_ids,
@@ -146,8 +186,16 @@ def main():
         if not response:
             response = "[no output — try more training steps or adjust temperature]"
 
-        print(response)
+        # Screen output before displaying it
+        output_safe, sanitized_response = guardrails.verify_output(response)
+        if not output_safe:
+            sanitized_response = guardrails.config.output_block_message
+
+        print(sanitized_response)
         print()
+
+        brain.add_turn("user", sanitized_user)
+        brain.add_turn("assistant", sanitized_response)
 
 
 if __name__ == "__main__":

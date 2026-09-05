@@ -35,12 +35,12 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ── Load tokenizer & model (no 4-bit on Mac) ─────────────────────────────────
 print("Loading tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B-Instruct")
+tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-1B-Instruct")
 tokenizer.pad_token = tokenizer.eos_token
 
 print("Loading model (this takes a minute)...")
 model = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-1.5B-Instruct",
+    "meta-llama/Llama-3.2-1B-Instruct",
     torch_dtype=torch.float32,
     device_map={"": device},
 )

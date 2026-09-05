@@ -2,7 +2,7 @@
 generate_teacher_labels.py — Run teacher model to generate soft labels for Anthos distillation
 
 Step 1 of offline distillation:
-  Run this ONCE with a large teacher model (Qwen3-14B, LLaMA-3.1-70B, etc.)
+  Run this ONCE with a large teacher model (Llama-3.1-8B, LLaMA-3.1-70B, etc.)
   to generate soft probability labels. Then train Anthos student on those labels.
 
 Requires teacher model installed via HuggingFace or Unsloth.
@@ -10,7 +10,7 @@ Requires teacher model installed via HuggingFace or Unsloth.
 Usage:
     # With a HuggingFace model (needs enough RAM/VRAM):
     python generate_teacher_labels.py \
-        --teacher Qwen/Qwen3-7B \
+        --teacher Qwen/Llama-3.2-3B \
         --dataset roneneldan/TinyStories \
         --n_samples 50000 \
         --top_k 64 \
@@ -28,17 +28,17 @@ Usage:
 
 Teacher recommendations by hardware:
     M1 Max 64GB:
-        → Qwen3-14B Q4_K_M via Ollama/llama.cpp (~8GB) — best quality/speed ratio
-        → Qwen3-7B Q4_K_M (~4GB) — faster, still good
+        → Llama-3.1-8B Q4_K_M via Ollama/llama.cpp (~8GB) — best quality/speed ratio
+        → Llama-3.2-3B Q4_K_M (~4GB) — faster, still good
         → LLaMA-3.1-8B Q4_K_M (~5GB) — alternative
 
     Current MacBook Pro (CPU only):
-        → Qwen3-1.7B or Qwen3-0.6B — only viable option on CPU
+        → an open-source LLM or an open-source LLM — only viable option on CPU
         → Better to generate labels on a cloud GPU instance once
 
     Cloud (recommended for label generation):
         → Rent a GPU instance (Lambda, RunPod, Vast.ai) for $0.5-1/hr
-        → Run Qwen3-32B or LLaMA-3.1-70B for highest quality labels
+        → Run Llama-3.1-70B or LLaMA-3.1-70B for highest quality labels
         → 50k samples takes ~2-4 hours on a single A100
 """
 
@@ -100,7 +100,7 @@ def generate_labels(args):
 def main():
     parser = argparse.ArgumentParser(description="Generate teacher soft labels for Anthos distillation")
     parser.add_argument("--teacher",      type=str, default=None,
-                        help="HuggingFace model name (e.g., Qwen/Qwen3-7B)")
+                        help="HuggingFace model name (e.g., Qwen/Llama-3.2-3B)")
     parser.add_argument("--dataset",      type=str, default="roneneldan/TinyStories")
     parser.add_argument("--n_samples",    type=int, default=50_000)
     parser.add_argument("--top_k",        type=int, default=64,

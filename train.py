@@ -103,7 +103,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
     model_cfg, train_cfg = get_training_config(tier)
     device   = "cuda" if torch.cuda.is_available() else "cpu"
-    ckpt_dir = Path("checkpoints/anthos-proof")
+    ckpt_dir = Path("checkpoints") / train_cfg.run_name
 
     # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):

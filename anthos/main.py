@@ -68,7 +68,7 @@ from anthos.lora_pairs import DualLoRAAdapter
 @dataclass
 class AnthosConfig:
     # Token vocabulary
-    vocab_size:    int   = 32000
+    vocab_size:    int   = 50262  # GPT-2 base (50257) + 5 Anthos special tokens
 
     # Hidden dimension & heads
     dim:           int   = 2048
@@ -959,8 +959,8 @@ def _base(overrides: dict) -> AnthosConfig:
 
 
 # n_thought_tokens scales with model size — more parameters = richer working memory
-def anthos_1b()   -> AnthosConfig: return _base(dict(dim=2048, n_heads=16, n_experts=64,  expert_dim=2048, max_loop_iters=16, max_seq_len=4096,   vocab_size=32000, n_thought_tokens=16))
-def anthos_3b()   -> AnthosConfig: return _base(dict(dim=3072, n_heads=24, n_experts=64,  expert_dim=4096, max_loop_iters=16, max_seq_len=4096,   vocab_size=32000, n_thought_tokens=24))
-def anthos_10b()  -> AnthosConfig: return _base(dict(dim=4096, n_heads=32, n_experts=128, expert_dim=5632, max_loop_iters=24, max_seq_len=8192,   vocab_size=32000, n_thought_tokens=32))
-def anthos_50b()  -> AnthosConfig: return _base(dict(dim=6144, n_heads=48, n_experts=256, expert_dim=9728, max_loop_iters=32, max_seq_len=8192,   vocab_size=32000, n_thought_tokens=48))
-def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568,max_loop_iters=32, max_seq_len=1_000_000, vocab_size=32000, n_thought_tokens=64))
+def anthos_1b()   -> AnthosConfig: return _base(dict(dim=2048, n_heads=16, n_experts=64,  expert_dim=2048, max_loop_iters=16, max_seq_len=4096,   vocab_size=50262, n_thought_tokens=16))
+def anthos_3b()   -> AnthosConfig: return _base(dict(dim=3072, n_heads=24, n_experts=64,  expert_dim=4096, max_loop_iters=16, max_seq_len=4096,   vocab_size=50262, n_thought_tokens=24))
+def anthos_10b()  -> AnthosConfig: return _base(dict(dim=4096, n_heads=32, n_experts=128, expert_dim=5632, max_loop_iters=24, max_seq_len=8192,   vocab_size=50262, n_thought_tokens=32))
+def anthos_50b()  -> AnthosConfig: return _base(dict(dim=6144, n_heads=48, n_experts=256, expert_dim=9728, max_loop_iters=32, max_seq_len=8192,   vocab_size=50262, n_thought_tokens=48))
+def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568,max_loop_iters=32, max_seq_len=1_000_000, vocab_size=50262, n_thought_tokens=64))

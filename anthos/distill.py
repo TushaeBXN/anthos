@@ -11,7 +11,7 @@ Strategy 1 — Offline Distillation (recommended to start)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Pre-generate teacher soft labels (top-k logprobs) and save to disk.
 Train Anthos on saved labels — teacher never runs during student training.
-Teacher can be a much larger model (Qwen3-32B, LLaMA-3.1-70B, etc.) that
+Teacher can be a much larger model (Llama-3.1-70B, LLaMA-3.1-70B, etc.) that
 you run once via Unsloth Studio or vLLM to generate the label dataset.
 
 Workflow:
@@ -23,7 +23,7 @@ Strategy 2 — Online Distillation (higher quality, requires both models in VRAM
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Teacher runs alongside student each step. Student sees fresh teacher
 distributions per batch. Requires teacher and student both fit in RAM/VRAM.
-Feasible on M1 Max 64GB: Qwen3-7B teacher (Q4: ~4GB) + Anthos-1B student (~2GB).
+Feasible on M1 Max 64GB: Llama-3.2-3B teacher (Q4: ~4GB) + Anthos-1B student (~2GB).
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 Loss formula (Hinton et al. 2015, adapted):
@@ -62,7 +62,7 @@ Usage — Online:
 
     distiller = OnlineDistiller(
         student=anthos_model,
-        teacher=qwen_model,             # any HF model
+        teacher=teacher_model,             # any HF model
         cfg=DistillConfig(temperature=4.0),
     )
     loss, info = distiller.step(input_ids, n_loops=8)
@@ -197,15 +197,15 @@ class TeacherLabelGenerator:
     distributions (which are huge). Student reconstructs approximate
     distribution from top-k during training.
 
-    Designed for running a large teacher model (Qwen3-14B, LLaMA-3.1-70B)
+    Designed for running a large teacher model (Llama-3.1-8B, LLaMA-3.1-70B)
     through Unsloth or HuggingFace Transformers once, offline.
 
     Usage:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         from anthos.distill import TeacherLabelGenerator
 
-        teacher  = AutoModelForCausalLM.from_pretrained("Qwen/Qwen3-14B", ...)
-        tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-14B")
+        teacher  = AutoModelForCausalLM.from_pretrained("Qwen/Llama-3.1-8B", ...)
+        tokenizer = AutoTokenizer.from_pretrained("Qwen/Llama-3.1-8B")
 
         gen = TeacherLabelGenerator(teacher, tokenizer, top_k=64)
         gen.generate(
@@ -261,7 +261,6 @@ class TeacherLabelGenerator:
         self.teacher.eval()
 
         n_written = 0
-        batch_ids_accum = []
 
         with open(output_path, "w") as fout:
             for sample in dataset:
@@ -342,7 +341,7 @@ class OnlineDistiller:
     Runs teacher and student forward passes together each training step.
 
     Feasible on M1 Max 64GB:
-        Qwen3-7B (Q4_K_M via llama.cpp ≈ 4GB) as teacher
+        Llama-3.2-3B (Q4_K_M via llama.cpp ≈ 4GB) as teacher
         Anthos-1B (bfloat16 ≈ 2GB) as student
         Total: ~6GB — fits with room for gradients and activations
 

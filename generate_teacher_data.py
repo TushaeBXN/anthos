@@ -2,7 +2,7 @@
 Anthos — Teacher Data Generation
 Think in Streams.
 
-Uses Qwen2-0.5B-Instruct (free, ungated, CPU-friendly) as a teacher model
+Uses Llama-3.2-1B-Instruct (free, ungated, CPU-friendly) as a teacher model
 to generate high-quality conversations, then saves them in Anthos chat format.
 
 Anthos trains on conversations written by a model that already knows how to talk.

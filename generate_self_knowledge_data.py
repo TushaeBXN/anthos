@@ -21,7 +21,7 @@ SYSTEM = (
 
 FACTS = {
     "native_params": "7 to 47 million depending on the training tier",
-    "qwen_base": "Qwen2.5-1.5B (1.5 billion base parameters with LoRA adapters on top)",
+    "qwen_base": "Llama-3.2-1B (1.5 billion base parameters with LoRA adapters on top)",
     "created": "2026",
     "creator": "Brian Tushae Thomas",
     "arch": "Thought-Token Bifurcated Recurrent Transformer (TT-BRT)",
