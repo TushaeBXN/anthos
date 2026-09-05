@@ -307,7 +307,11 @@ def get_training_config(tier: str = "smoke"):
         train_cfg = TrainingConfig(
             device        = "cuda",
             dtype         = auto_dtype,
-            dataset       = "data/openhermes_sft.jsonl" if Path("data/openhermes_sft.jsonl").exists() else "Open-Orca/SlimOrca",
+            dataset       = (
+                "data/sft_combined.jsonl"   if Path("data/sft_combined.jsonl").exists()   else
+                "data/openhermes_sft.jsonl" if Path("data/openhermes_sft.jsonl").exists() else
+                "Open-Orca/SlimOrca"
+            ),
             seq_len       = 512,
             batch_size    = 8,
             max_steps     = 10_000,       # ~1% pass through OpenHermes 1M
