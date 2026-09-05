@@ -20,7 +20,7 @@ Quick path to usable model (no custom GGUF needed):
   - OR: use CachedGenerator directly in Python
 
 Usage:
-    from anthos.export import export_safetensors, export_gguf_config, quantize_model
+    from anthos.export import export_safetensors, export_gguf_metadata, quantize_model
 
     # Export weights
     export_safetensors(model, "exports/anthos_1b/model.safetensors")
