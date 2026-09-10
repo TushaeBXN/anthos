@@ -224,6 +224,21 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     )
     thought_collector.attach()
 
+    # Thought-token ID stability guard — catches silent drift if tokenizer is
+    # regenerated with a different special-token order.
+    if Path("data/anthos_tokenizer").exists():
+        try:
+            from transformers import AutoTokenizer as _AT
+            _tok_check = _AT.from_pretrained("data/anthos_tokenizer")
+            _tht_actual = _tok_check.convert_tokens_to_ids("<|thought|>")
+            assert _tht_actual == 50259, (
+                f"THT_ID mismatch: tokenizer says <|thought|>={_tht_actual}, "
+                f"train.py hardcodes 50259. Regenerate tokenizer or update THT_ID."
+            )
+            del _tok_check, _tht_actual, _AT
+        except Exception as _e:
+            print(f"  ⚠ thought-token ID check failed: {_e}")
+
     # ── Which heads are active this run? (resolve ambiguity before training) ──
     _has_prerouter = hasattr(model.recurrent, "prerouter_head")
     _has_halt_probs = hasattr(model, "halt_probs") or True  # always exposed via forward
