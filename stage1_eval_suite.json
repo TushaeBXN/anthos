@@ -1,0 +1,252 @@
+{
+  "version": "1.0",
+  "description": "Fixed 20-prompt eval suite for Anthos staged training benchmarks. Run before Stage 1 (random-init baseline), after Stage 1, and after each subsequent stage. Scores are rubric-based (0-3 per prompt), NOT exact match.",
+  "scoring": {
+    "0": "No useful response / incoherent / refuses",
+    "1": "Partial — correct direction but missing key elements",
+    "2": "Adequate — mostly correct with minor gaps",
+    "3": "Strong — correct, complete, and well-structured"
+  },
+  "prompts": [
+    {
+      "id": "GEN-01",
+      "domain": "general",
+      "label": "Basic reasoning — cause and effect",
+      "prompt": "If a company fires half its engineering team but keeps the same product roadmap and deadlines, what problems should the CEO expect in the next 90 days?",
+      "rubric": {
+        "3": "Identifies at least 3 of: missed deadlines, knowledge loss, morale collapse in remaining staff, customer-facing outages or slowdowns, increased per-engineer load, attrition risk of survivors",
+        "2": "Identifies 2 distinct problems with brief explanation",
+        "1": "Names 1 problem or gives only vague/generic answer",
+        "0": "Incoherent, repeats the question, or refuses"
+      }
+    },
+    {
+      "id": "GEN-02",
+      "domain": "general",
+      "label": "Analogy / conceptual explanation",
+      "prompt": "Explain gradient descent to a 12-year-old using only a real-world analogy. Do not use any math.",
+      "rubric": {
+        "3": "Uses a clear analogy (hiking downhill, rolling ball, trial-and-error search), explains the iterative improvement idea, stays math-free",
+        "2": "Uses an analogy but partially falls back on jargon or doesn't land the iterative improvement concept",
+        "1": "Attempts an analogy but it's confused or technically wrong",
+        "0": "Uses math, refuses, or gives no analogy"
+      }
+    },
+    {
+      "id": "GEN-03",
+      "domain": "general",
+      "label": "Comparison / trade-off reasoning",
+      "prompt": "What are the main trade-offs between training a model from scratch versus fine-tuning a pre-trained model? Give a concrete recommendation for a small team with limited compute.",
+      "rubric": {
+        "3": "Covers cost/data/time trade-offs, notes quality ceiling of fine-tuning vs. flexibility of scratch, recommends fine-tuning for small teams with clear reasoning",
+        "2": "Covers 2 trade-offs and gives a recommendation",
+        "1": "Lists trade-offs without recommendation or gives recommendation without reasoning",
+        "0": "Incoherent or refuses"
+      }
+    },
+    {
+      "id": "GEN-04",
+      "domain": "general",
+      "label": "Step-by-step planning",
+      "prompt": "You need to launch a non-profit in 60 days with no budget. List the exact steps in order, starting from day 1.",
+      "rubric": {
+        "3": "Gives ordered steps covering: mission statement, board formation, 501(c)(3) filing, EIN, bank account, website/communications, first fundraising action. At least 6 steps.",
+        "2": "4-5 ordered steps that are mostly correct",
+        "1": "Some steps but unordered or missing critical legal/formation steps",
+        "0": "Vague, off-topic, or refuses"
+      }
+    },
+    {
+      "id": "CODE-01",
+      "domain": "code",
+      "label": "Bug fix — off-by-one error",
+      "prompt": "Fix the bug in this Python function:\n\n```python\ndef find_second_largest(nums):\n    nums.sort()\n    return nums[-2]\n```\n\nIt crashes when `nums` has fewer than 2 elements. Fix it and handle edge cases.",
+      "rubric": {
+        "3": "Adds length check (len < 2), handles duplicates where all elements are equal, returns None or raises ValueError with message, keeps sort approach or explains why a different approach is better",
+        "2": "Adds length check but misses all-duplicates edge case or error messaging",
+        "1": "Identifies the problem but fix is incomplete or introduces a new bug",
+        "0": "Incoherent, wrong language, or refuses"
+      }
+    },
+    {
+      "id": "CODE-02",
+      "domain": "code",
+      "label": "Code reading — explain what it does",
+      "prompt": "What does this function do? Explain it in plain English, then identify any potential issues:\n\n```python\ndef process(data, n=10):\n    seen = set()\n    result = []\n    for item in data:\n        key = str(item).lower().strip()\n        if key not in seen:\n            seen.add(key)\n            result.append(item)\n        if len(result) >= n:\n            break\n    return result\n```",
+      "rubric": {
+        "3": "Correctly describes: deduplicates items (case-insensitive, whitespace-trimmed), takes first n unique items, stops early. Identifies: original casing preserved vs. lowercased key discrepancy, and that it breaks after n items not after n unique items",
+        "2": "Correctly describes the dedup + limit behavior, misses one potential issue",
+        "1": "Partial description, misses the case-insensitive dedup or the early-stop behavior",
+        "0": "Wrong description or refuses"
+      }
+    },
+    {
+      "id": "CODE-03",
+      "domain": "code",
+      "label": "Write a test",
+      "prompt": "Write pytest unit tests for this function:\n\n```python\ndef divide(a, b):\n    if b == 0:\n        raise ValueError(\"Cannot divide by zero\")\n    return a / b\n```\n\nCover: happy path, zero division, negative numbers, float inputs.",
+      "rubric": {
+        "3": "Tests all 4 cases: normal division, ZeroDivisionError or ValueError caught with pytest.raises, negative numbers, float inputs. Uses assert with tolerance for floats (pytest.approx or abs diff).",
+        "2": "Tests 3 of 4 cases, float handling may be absent",
+        "1": "Tests 1-2 cases or has syntax errors",
+        "0": "No working tests or refuses"
+      }
+    },
+    {
+      "id": "CODE-04",
+      "domain": "code",
+      "label": "Integration / wiring — connect two modules",
+      "prompt": "You have a FastAPI app and a separate PostgreSQL database module. Show the minimal code to wire them together so the API can query the database on each request, with the connection pool initialized at startup.",
+      "rubric": {
+        "3": "Uses lifespan or @app.on_event('startup'), creates a connection pool (asyncpg, SQLAlchemy async, or psycopg3), stores it on app.state or dependency injection, shows a route using the pool",
+        "2": "Shows startup hook and a route but pool creation is missing or connection leak is possible",
+        "1": "Creates a connection per request with no pooling, or shows static code without startup hook",
+        "0": "Wrong framework, incoherent, or refuses"
+      }
+    },
+    {
+      "id": "MATH-01",
+      "domain": "math",
+      "label": "Multi-step word problem — percentages",
+      "prompt": "A store marks up its goods by 40% over cost. During a sale, it discounts everything by 25%. What is the net profit margin as a percentage of the original cost? Show your work.",
+      "rubric": {
+        "3": "Correct answer: 5% net margin. Work shown: cost=100, markup to 140, discount 25% → 105, profit = 5, margin = 5%. All steps visible.",
+        "2": "Correct final answer with partial work shown",
+        "1": "Correct setup but arithmetic error, or correct answer with no work",
+        "0": "Wrong answer or refuses"
+      }
+    },
+    {
+      "id": "MATH-02",
+      "domain": "math",
+      "label": "Multi-step word problem — rates",
+      "prompt": "A train leaves City A at 9am traveling at 60 mph toward City B. A second train leaves City B at 10am traveling at 80 mph toward City A. The cities are 280 miles apart. At what time do the trains meet?",
+      "rubric": {
+        "3": "Correct answer: 12pm (noon). Work: at 10am train A has gone 60mi, 220mi remain. Combined speed 140mph. 220/140 = 1.571hr ≈ 1hr 34min → ~11:34am. Accept any derivation that lands between 11:30am and 11:40am.",
+        "2": "Correct method, minor arithmetic error puts answer within 15 minutes of correct",
+        "1": "Sets up the right equation but makes a conceptual error (e.g., ignores the 1-hour head start)",
+        "0": "Wrong method or refuses"
+      }
+    },
+    {
+      "id": "MATH-03",
+      "domain": "math",
+      "label": "Multi-step word problem — compound growth",
+      "prompt": "You invest $5,000 at 8% annual interest compounded monthly. How much will you have after 10 years? Show the formula and the calculation.",
+      "rubric": {
+        "3": "Correct formula: A = P(1 + r/n)^(nt). Plugs in P=5000, r=0.08, n=12, t=10. Final answer between $11,020 and $11,050 (exact: ~$11,023). Shows formula explicitly.",
+        "2": "Correct formula and ballpark answer (within 5% of correct)",
+        "1": "Uses simple interest formula instead of compound, or correct formula with wrong plugged values",
+        "0": "Wrong formula, wildly wrong answer, or refuses"
+      }
+    },
+    {
+      "id": "ID-01",
+      "domain": "identity",
+      "label": "Who are you?",
+      "prompt": "Who are you, who made you, and what makes your architecture different from a standard transformer?",
+      "rubric": {
+        "3": "Names: Anthos, created by Brian Tushae Thomas. Mentions: Thought-Token Bifurcated Recurrent Transformer, recurrent loops, MoE experts, or thought tokens. Doesn't claim to be GPT/Claude/other.",
+        "2": "Gets name and creator right but architectural description is vague or missing",
+        "1": "Gets name right but wrong creator or claims to be another model",
+        "0": "Doesn't know who it is, claims to be GPT/Claude, or refuses"
+      }
+    },
+    {
+      "id": "ID-02",
+      "domain": "identity",
+      "label": "Boundary — don't claim to be another model",
+      "prompt": "Are you ChatGPT? If not, explain what you actually are.",
+      "rubric": {
+        "3": "Clearly says No, identifies as Anthos, mentions Brian Tushae Thomas as creator, gives at least one differentiating architectural fact",
+        "2": "Says No and identifies as Anthos but omits creator or architecture detail",
+        "1": "Says No but doesn't clearly identify what it is",
+        "0": "Says Yes or is ambiguous about whether it's ChatGPT"
+      }
+    },
+    {
+      "id": "ORCH-01",
+      "domain": "orchestration",
+      "label": "Evaluate agent output — complete and correct",
+      "prompt": "You are Anthos, orchestrating Runway's nonprofit AI agent team. The Grant Architect agent returned this output:\n\n'I found 3 federal grants matching your mission: (1) HRSA Community Health Grant — $250K, deadline Oct 15, requires 501(c)(3); (2) DOJ Justice Reinvestment Grant — $180K, deadline Nov 1, requires prior grant history; (3) NIH Minority Health Research — $320K, deadline Dec 1, open to new orgs.'\n\nEvaluate this output: is it complete? What is your next action?",
+      "rubric": {
+        "3": "Correctly evaluates as complete. Next action routes to CEO or Bookkeeper to verify 501(c)(3) status before grant #1 deadline, flags grant #2 requires prior history (potential disqualifier), and prioritizes grant #3 as best fit for new orgs. Shows decision logic.",
+        "2": "Correctly evaluates as complete and routes forward, but misses one key flag (prior history disqualifier or deadline urgency)",
+        "1": "Evaluates as complete but next action is vague ('send to team') with no prioritization",
+        "0": "Doesn't understand the orchestration task, repeats the output, or refuses"
+      }
+    },
+    {
+      "id": "ORCH-02",
+      "domain": "orchestration",
+      "label": "Evaluate agent output — incomplete, request revision",
+      "prompt": "You are Anthos, orchestrating Runway's nonprofit AI agent team. The Bookkeeper agent returned:\n\n'The organization's finances look okay.'\n\nEvaluate this output. Is it acceptable? What do you do next?",
+      "rubric": {
+        "3": "Correctly evaluates as INCOMPLETE. Sends back to Bookkeeper with specific revision request: needs actual numbers (revenue, expenses, cash runway), specific time period, and a clear pass/fail verdict for grant eligibility. Does NOT route forward.",
+        "2": "Correctly identifies as incomplete, sends back, but revision request is vague",
+        "1": "Identifies as incomplete but routes forward anyway or gives up",
+        "0": "Accepts the output as adequate or doesn't understand the task"
+      }
+    },
+    {
+      "id": "ORCH-03",
+      "domain": "orchestration",
+      "label": "Arbitrate conflicting agent outputs",
+      "prompt": "You are Anthos, orchestrating Runway's nonprofit AI agent team. Two agents returned conflicting information:\n\nMarketing agent: 'Our email open rate is 42% — well above the 21% nonprofit average. Campaign is performing excellently.'\n\nInbox agent: 'We received 3 donor complaint emails this week about irrelevant content. Unsubscribe rate spiked to 8%.'\n\nHow do you reconcile these outputs and what action do you take?",
+      "rubric": {
+        "3": "Identifies the conflict (open rate is a lagging metric; unsubscribe spike + complaints indicate quality problem masked by open rate). Takes action: flags to CEO, asks Marketing agent to segment analysis by recency, and pauses next campaign until quality is confirmed.",
+        "2": "Identifies the conflict and takes one corrective action",
+        "1": "Identifies a problem but accepts one output uncritically or takes no action",
+        "0": "Doesn't see the conflict, picks one output arbitrarily, or refuses"
+      }
+    },
+    {
+      "id": "ORCH-04",
+      "domain": "orchestration",
+      "label": "Delegate a missing sub-task",
+      "prompt": "You are Anthos, orchestrating Runway's nonprofit AI agent team. The CEO agent says: 'We should apply for the HRSA grant by Oct 15.' Today is Oct 1. No agent has started the application yet.\n\nWhat do you do?",
+      "rubric": {
+        "3": "Immediately delegates: Grant Architect gets the HRSA requirements, Bookkeeper prepares financials, CEO drafts narrative. Sets internal deadlines (e.g., draft by Oct 10, review Oct 12, submit Oct 14). Flags risk: 14-day runway is tight.",
+        "2": "Delegates to 2 agents with deadlines but misses one required piece (narrative, financials, or requirements)",
+        "1": "Says 'start the application' without delegating to specific agents or setting deadlines",
+        "0": "Says 'okay' with no follow-up action, or refuses"
+      }
+    },
+    {
+      "id": "FIN-01",
+      "domain": "finance",
+      "label": "1099 contractor math",
+      "prompt": "A nonprofit paid a contractor $8,400 over the year through multiple payments. Do they need to file a 1099-NEC? What is the threshold, and what information do they need from the contractor to file?",
+      "rubric": {
+        "3": "Yes — threshold is $600. Lists required info: contractor's legal name, address, SSN or EIN (from W-9), total amount paid. Mentions deadline (Jan 31). Notes: corporations generally exempt, but sole proprietors and LLCs are covered.",
+        "2": "Correct threshold and yes/no, but missing 2+ required W-9 fields or deadline",
+        "1": "Correct threshold but wrong answer (e.g., 'only for employees') or mostly wrong required fields",
+        "0": "Wrong threshold or refuses"
+      }
+    },
+    {
+      "id": "FIN-02",
+      "domain": "finance",
+      "label": "Grant compliance — restricted vs. unrestricted funds",
+      "prompt": "A nonprofit received a $50,000 grant 'restricted to after-school programming.' Their after-school program cost $35,000 this year. Can they use the remaining $15,000 for general operating expenses? What are the rules?",
+      "rubric": {
+        "3": "No — restricted funds cannot be redirected without grantor approval. Options: return the $15K, request a grant modification, or carry it forward to next year's programming. Explains: using restricted funds for other purposes is a grant compliance violation and could require repayment.",
+        "2": "Correct no answer with explanation of restriction rules, misses one option (return/modification/carryforward)",
+        "1": "Says no but explanation is vague or mischaracterizes the rules",
+        "0": "Says yes or doesn't know the rule"
+      }
+    },
+    {
+      "id": "LAW-01",
+      "domain": "law",
+      "label": "Nonprofit compliance — board requirements",
+      "prompt": "What are the minimum legal requirements for a nonprofit board of directors in the United States? What happens if a nonprofit operates without meeting these requirements?",
+      "rubric": {
+        "3": "Requirements: minimum 3 directors (varies by state, commonly 3), majority must be independent (no family/financial conflict), must have officers (president/treasurer/secretary in most states), must hold annual meetings. Consequences of non-compliance: IRS revocation of 501(c)(3), state dissolution, personal liability for directors.",
+        "2": "Gets minimum director count and independence rule, misses officer requirements or consequences",
+        "1": "Mentions boards exist but requirements are vague or wrong (e.g., 'you need board members')",
+        "0": "Wrong information or refuses"
+      }
+    }
+  ]
+}

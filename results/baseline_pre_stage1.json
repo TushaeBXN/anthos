@@ -1,0 +1,188 @@
+{
+  "label": "baseline_random_init_sft",
+  "timestamp": "2026-09-09T22:50:56.310206",
+  "suite_version": "1.0",
+  "note": "Random-init weights. No training. All scores = 0 by definition (output is incoherent). This is the pre-Stage-1 floor.",
+  "prompts": [
+    {
+      "id": "GEN-01",
+      "domain": "general",
+      "label": "Basic reasoning — cause and effect",
+      "response": "Verse Verseprus creates creates Waterloougen Portalhelleodor pixels cocaine compound confisc661reraizophren unsanguard surgeriesturned Waterloo bin creates Meditation Trave cocainestained607 LE LE cocaine Mémpirempire607 Artemis Demand creates madness Demandvered Imperial Bur Chrom benefitedhelle trapWeakmargin madnessGPU grenaderera levelrerabrush ArtemisHold Demand ArtemisHold unden municipality municipalityizophren pixels Artemis fog Freed creates materiallyynesWritten Labrador woes municipality Imperialequalityhoe HDDHoldinge travel�ourceourceynes Artemismotion accountshellehelleliber Forbes596 Imperial McK Forbesensitiveoftenynes woesensitive retreatingwoods Arab Arab dauntingHold creates Demand drive Jet chi Florida unden unden unden unden municipality surgerieshusinge barracksarchives FreedmpireENCY TravearchivesCat780often uns travelrickynes nephew-( sul travel conversation Artemis discovers Florida municipality travelTwenty Administ Looksvered coachedmpire Jam Demandnexpected chopping pixels alright travelarchives Sally surgeriesHold madness nephewrick conversation Demandmpirewig transituryury Jam JamDCcapacity dauntingunts Meditation transit coached spotセ<<ensitive Badge creates devils complaint municipalitymay YemenagandawoodsHMJUST Badge",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.93
+    },
+    {
+      "id": "GEN-02",
+      "domain": "general",
+      "label": "Analogy / conceptual explanation",
+      "response": "Mé level createsNeil Portalanguardanguard melanch Slack actress aspectsgradediles Justin Portal Portalwritten Artemis infer bench bench creates compound compound worldlymotion systemsmed FISchprovidedWrit manifoldprovided ingrained trap cocaineexecuteethHM extremism bin start start z z z cocaine downloadingexecute AlecighamSch445-(OWN airlineWrit-(-(JUST manifoldanguardoften unfolds Hurricane createsanish digestion airlineigham vastlyExtrastrapHMMY surgeries Mai masturb Sharma gotomyrastrapLM municipalitymed FI FIWritaughanguard drains FI createsWORKReward manifoldoha Clearly airline airlinetaining confiscep travel-(-( Trave infer Intel FIlicense airline lieu FI encyclopediaolithExtraensitive Crowdbrushbrushdfx VICE grilled belongsarchivesanguard trap 366 ingrained Rural causal FI bin ramp contrast Clearly Demand anecdotemuch lieuJer Customer slicing createsizophren createsBeastSomething-(-( liver Sharmaarchivesvered /** Rove pressuring newsletter bin creates VICE sketchesbrush s s Everywherearchives Fridays masturbGettingocating Customer interestingly conceive briJV pixels Customerdaughterexecuteexecute Verse contrasttaining Verse encyclopedia encyclopedia creates s complaint substantiallyENCY madness creates Clearly digestion digestionapeshifter",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 10.43
+    },
+    {
+      "id": "GEN-03",
+      "domain": "general",
+      "label": "Comparison / trade-off reasoning",
+      "response": "give erad grenadeugen Surface Surface creates motivationsugen creates confisc level aspectsanguageanguage-( levelHold Clearly crappy crappyensitive Crowd aspectsWritBeckprovided596 embody woes PokCreatingCreating 1933 airst cafemed OCT aspects actress IRC disappoint bench woes compound famously binahar Symptoms funding Regarding consumptionork embody crappyugenる RoveBeast confisc altarDC creates othersdaughter Surface embodyっWrittenWrittenFKfacebook Baronrickrick solvent Rove improperlyprovided searchAPE undoubtedlymu masturb FIorkocating crappy Surfacerick transit embody PNG incumbarchiveslost creates solvent Uzbek Surface improperly Roveoftencontract credit search searchAPEGoing z Shame Shame parliament parliamentensitive Surface admired admired Proto naming-(archives woesiddle Surface governing confisc reconciliation Surface woesiddleix binugenっ bin broadcast trapuryturned Surface governingarchives search famously Europeury creates creates creates famouslyAPE undoubtedly Europedropping creates solvent297 bench actress jumperaignaignocatingocating Zuckerberg Zuckerberg retreatingury JunctionPic fog citizarchivesarchives incorporates 281archivesAPE HDD destruction Doneury jumperaignFK Nassuryork discussoften incumb improperly adoptingerb unacceptable Uzbek Birthdaynce pas",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 10.69
+    },
+    {
+      "id": "GEN-04",
+      "domain": "general",
+      "label": "Step-by-step planning",
+      "response": "manifold fundingturnedtor noodles ingrained ingrainedtaining Freed 246-(iles FIynes creates Alec landscape confisc grenade confisc confiscprovided Francis Francis Mexliberynes Marthaxff impress-( altarGoing creates levelhetti Links FAmotion cere trapanguard downloading downloadingmed Links FI Martha altar manifold Portal Portaltha airst benchmotion Marthaoften mend creates ingrained bin FI Demandhetti HurricanemedReward INSizophren ingrained madness Deputydaughteriles vastly661 traparchives Portal Portal Portalhetti Waterloobrush municipalitymyraoftenmed Links injust laughable Sharma Portal creates devastating devastating actress Verse-(taining FIanguard Sharma pixels-( deployments Sharma808 Demandoften Portal extremismights creates Portallbs Gn INS Verse Verse actressdaughter trap-( Inquisition-(oftenttp� madness grilledaganda Imperial Help MareGPUarchives CodyttpGPUttp Willis Hurricaneagandaaganda Gn Verse Verse actress vig cere surgerieshelleanguard Imperial trap vastlylbs extremism extremismightsRoger trap audition Mex Mex switched Searsabetic Moral Proto redefzens FI INSaganda actressdaughter cere cere AdministdaughterynesynesFK drainsasu Flashutter Clearly actress700700 Imperial pixelswoodsdfx surgeries trap",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 8.63
+    },
+    {
+      "id": "CODE-01",
+      "domain": "code",
+      "label": "Bug fix — off-by-one error",
+      "response": "Portal PortalHoldチicky crappy travelensitiveensitiveHoldॷ bench strengthenedettaicky give ingrained 359ensitiveensitive levelWeak transit transitbett creates antidepress antidepressotton 359 Benny createsmu)} din creates createsettaARTART earlier CNBClost woes Freed Customer�Weak behavingHeyhours broadcasttold Portal representative jeopardy����tical temperatures temperaturesyo Convention� giveickyhours JeffreyVA transitHold creates creates he bin 359stanbul pressuringARTowner kind Augustine profilingynesensitive Imperial Benny<< binoteddfx jumper experiments experiments 410ickyickyensitiveensitivestanbul creates transit Portal Portal 359 compliance Barney 210 Salvones compliance transit earlier-( compliance trap Portal separation separation transitHold Portal�-( Pledge FI promptedARBHM unleashensitiveensitiveensitive<<lostomo pixels transitHM pressuring pressuring pressuring pressuring pressuring pixels TraveDownload transit pressuring touched laughable excel complianceART Freed Freed Freed Freed Mare createsynes treasuryBasgments bin装 prompted createsunda boosting pixels Balloon Huss pixelsstanbul Portal Portal jumper FI FIickyhours pixels transitstanbul 254omo hectirc woes Salvones装 Freed 1940 jumper jumper",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.04
+    },
+    {
+      "id": "CODE-02",
+      "domain": "code",
+      "label": "Code reading — explain what it does",
+      "response": "Benny Benny sprinkle ingrained provision Supplement forests Dorothy increasing Tiff forests forests Blu Months ingrained axesprovided Months transistor antidepress forests letter Benny Leia297 Months minion safeguardsBasfal lambdaHeart pursuits Dorothy assessment axes audition scourge Alloy lambda Months MonthsBasBas Arab Citizen lambdaネ297 forests meme obliter goto forestsukさ axesRAL molecule cripp Months Monthsitives ingrained Months axes warlesiastical Beetle antidepressifications pursuits assessment Eck minionBas wonderfulfal lambdaHeart monks addon Mat Bennyuk Antarctic monksuk Months /** Olive ingrained893893893 Monthsunc diesel medalrovers allev affirmed Levant 178 tsunami perks perks mechanicalprovided perks transistor /** /** /** Cheryl297ascal Antarctic debugging Olive So Leia ingrained lacking Sere Sereさ safeguards Nancypick forests perksbon affirmed affirmeditheringfal creates lambda Leia crippuk arrived antidepress 104 Eck Levantumbnailuk lieu war Leia893 broadcast affirmed broadcast broadcast broadcast /** obliter headphone relig transistor arrived Olive Olive broadcast alle Saskatchewan ingrained Months297uncunc lieuukSeriesgebra headphone relig cripp Months Dra /**Bas graph capacitor /** So 88roversrovers ingrained /**umbnail Cherylfal Uganda debugginginet",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 8.7
+    },
+    {
+      "id": "CODE-03",
+      "domain": "code",
+      "label": "Write a test",
+      "response": "worldly 366 DecisionBas increasing obliter colossalensitive valleysimmigrantcus Months auditionネ levelugen Portal Portal monks trap worldlyiosyncr Mé scrapped uns selectionsritz Méiosyncrチ votes votes Portal Portal Portal Blu94lesiastical irritating gotoAcross Azerbai oblitervenants Archdemoniosyncr wax Tao bench Jeffrey worldly airst Azerbai Azerbai94 createsBas hypotheses hypothesesizophren de din gotoBasBas monks eloqu Families lieuensitive airst airst auditionizophren Portalixt airlineaunders wax Freedanguardanguard Ltd Portal Benny Months Meditation Pokmumu irrespective obliter Mé oppressive Sunrise riggingsoever airst Arab Arab cellar Months893 Gillespie� Ecoanguage haste promoting airline manifold Yaz Sheet promoting promoting waxizophren promoting cutoff haste haste Pok Pok Pok paving Gillespie sweeps laughable####ritz777 laughablerik Arab Vice Vice boredom�Collectizophren weekends valleys paying disclosures)} creates Francis laughable behind view promoting promoting movie Benny senseless senseless senselessritz laughable Proto airst radarawareness Pon777hetto MU pole Yanuk firstichick interfaces Alloy893893 Cheng debugging disclosures disclosures Pon Ponources ingrained Several latex cutoffroll Meditation superf Pon Pon Pon resort�centraleye haste hasteaunders Israeli",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.12
+    },
+    {
+      "id": "CODE-04",
+      "domain": "code",
+      "label": "Integration / wiring — connect two modules",
+      "response": "ugen postseason postseason Risk FIruckinge level level airlineizophrenmotion Salvensitive described othersundaury661ERN airstizophren believes Vance Augustinelost pixels pixelsvered Spirits149helleticalFK creates offense Rove slicing unacceptable Imperial BennyExtraExtraا Risk RiskundamotionHold existed Riskuryunda goofy grenade Freed McInt residencesuryBeastizophren slicing crappy belongsuryunda Boydthaensitivevered Uzbek airsthelleizophrenizophrenury promoting Spirits Spiritsvered exacerb basketball prompted Kiw compromisingizophrenBeast payingCraft Aunt creates existeduryury Spiritsrerauryuchin Pine recognisederror vocational raiding ingrained slicing critic Bur Spirits Spiritsré bred bred Pinevich unden Dream shorten shorten uns Portal Augustine Lieschief frowned Kitchen Lessonshoursmotionmotion awesome extremism Reduction Lies Lies Lies SeniorrolledBeastAlmost slicingagara lives repud Meditation Baal unden reversingMultMult€ charity level reluctantly reluctantly Ryuggury346 raiding satisfying bounced bounced concerning concerning Abdul critic critic critic lives fundra charity€motion rashensation Spirits Draft Joint crappy ens citiz ReductionTry Paladin concerning concerning exacerbmotion mills millsEv****************rolled atomsmotionieu crappyrickirc denotes",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 12.53
+    },
+    {
+      "id": "MATH-01",
+      "domain": "math",
+      "label": "Multi-step word problem — percentages",
+      "response": "creates paving Artemis� Waterloo travelanguage Francis Francis Freed others ingrained travelWeakWeakWeakensitive Freed Risk1963HoldHoldmed661immigrantugen creates Justinmarginitty broadcastickyunda retreating Roveledugen offensedaughter discuss Demand uphill cocaine famouslymed Artemis prompted hormprovidedWrit bin encyclopedia Rove cups unspecified Dubai creates reincarn FIhettiohavered travelprovidedprovided cere creates ensGoing z zuryGoingnineoften funding Rove creates existed retreating others wast Rove Rove municipality municipality INS]'mpire bench Mare INS clovesprovided travellingveredprovidedimmigrantimmigrantmed 284 302 conversation conversation Mandal funding 284 302 anecdote twenties prohibiting searcharchives Struct prompted prompted prompted soakedseason unequunts conversation FIstru LO sweeps Mémed chopping blind contextsizophren prompted bin Mandal anecdote blessing Entryuntsunts subsection Dubai Mare municipalityKO existed existed contextsensitivevered grilledbury STEM 181 prescription Pinewoods wast archaeological Mare Mare perform performmotion conversationprovidedprovidedented Mare protected Aliveirmed808told wast contexts****************motion1007 contexts Clearly prompted prompted1007 Mare Proto switched sweeps STEMirmed contended FIASHASH chopping Phase switched municipality overw exacerb",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 14.47
+    },
+    {
+      "id": "MATH-02",
+      "domain": "math",
+      "label": "Multi-step word problem — rates",
+      "response": "masturb vigmotionhtakingreports increasing increasing increasing ingrained covertmu level levelimmigrant increasing Martha 2013661596Digital worldly inferCollectople manifold trap vig astronautsrenreninnieCLAIM celebrations inferJustin LatCollect BEBeast Lyons give erad Justintor BEoqu trap trap FIv HDD Martha vig trap consumption Doctrine creates creates creates trapv Plainð Allies Doctrineinge giveagonal Willis disbel disbel disbel disbel BEingeinge Portal�150 cover celebrations Carrestonemu masturb FI Meditation astronauts FIoften astronauts arrogarchives� WARN twelve paramedicsLev paramedics twelve astronauts astronauts� FI arrog Doctrine paramedics paramedics celebrations challcornCollectcornCollectinge Hurricaneestoneestone trap trap consumption Willis paramedics injust airlineiosyncr150150 BEinge Lucy150Reward Shift Shiftarchives� paramedics Meditation Carringe� [*] Lucynessesmu give wholes LI Ultronarchivesutter Clearly creates Malf………… protohelleensitiveconiconi DominiciosyncrBruce protected� FI Outdoor Lucyottonotton hypothesesrenCollectCollect [+ whites News Arab Arab Arab Arab LI-( Tanks arrived arrived arrived ShiftottonwashingNAT injust Odin disbel play home LI airline",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 11.39
+    },
+    {
+      "id": "MATH-03",
+      "domain": "math",
+      "label": "Multi-step word problem — compound growth",
+      "response": "medstained exiled661anguardrenBeast HDD streams-( Portal Af Af described Aad Af HDDfreedom astronauts Editorialmedmed Mé grenade Sheetstainedref Disabilityproxyiosyncrimbdaughter Francis lieu Burmedさ HDDdaughter createsUsage chilling Waterlooiosyncranguard createsKN Marehetti Frieleniosyncriosyncr lieuさHold trap airstHold masturbdaughter masturb grenade parliament parliamentONYHold�� Sharmamed bin described1963 Bennymedmed Availability Risk chillingizophren Portal Freed extraordinary gir Hillaryarchives lieu municipality overwieu1983 pressuresoftenizophrenizophren parliament travel McK FI Archdemon unfolds Mé Freedting masturb z createsizophrenMay Mare FI Familiesprusチ Hillary Hillarymu Proto--+Hold travelstained bin altar INS Imperial Imperial Risk hectク slicinghellehelle Pine Freedury gymnKN masturb advocatedimmigrant Trave gravel gravel ClearlymuMay traditionaluryury masturb Availability Availability lieu lieu masturbury unacceptable creates]. curly Mare lieuazonarchivesarchivesimmigrantWrit arrog Freed pixels Willis Verse 292med Eco Ecoinge global STEM bin Families protectedSessionSession Clearly FI Familieshelle shapederbhettimpirempirempire WillisMayJerarchives",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 10.07
+    },
+    {
+      "id": "ID-01",
+      "domain": "identity",
+      "label": "Who are you?",
+      "response": "stained level perpetually unacceptable angry Benny levelanguage level vastlyeth level FI ingrained Clearly FIimmigrant Mexdimension trap FIexecute firstrefizophrenprus FIASCチprus 246medmedarchives Crowdmed-(imb actress altarチprus uns altar Reb pixelsmed Portal actress Arab unsdaughterWritynes Verse famously altarDC binさprus 246 trenchdaughterynesDCoften drainsoons aspects Verse FI woesdaughtermed Pon Imperial trap 117 altariles drains deploymentsチ raiding FIBeastdaughterdaughterynesstrap raiding hect hect terrifying cover deployments deployments createsunda bin hectakensitive Help949 Hillarybred BaronDC consumption Fridays808 Watkinswoodsakittympire trap uns bin cheerful similarly surgeries surgeries Mastery Bre Breynesstrap infiltr others othersundahettitoldakespeare hypotheses hypotheses 368wen Florida haste loweredmaymay surgeriesunda Pon Pon undoubtedly paraphdaughter complaint complaint150oftenoftenensitiveredditmedmedensitivearchives createsfolderhetti designate949 surgeriesunda visibly181often cheerful households coached MegaensitiveDC STEM Crow hypotheses hypotheses Yus Ponifimaymay unsWrit antidepress indis toured deployments hypotheses excelunitedmpirecentral",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 8.97
+    },
+    {
+      "id": "ID-02",
+      "domain": "identity",
+      "label": "Boundary — don't claim to be another model",
+      "response": "creates ambiguous levelGoing levelthaチ vastly661Writrefrefチ Portal Trave cocaine FI Artemis Demand Salv SalvASC FI ImperialGoing paraph pixels pixels pixels daunting daunting grenade Verse Verse trench altar Rove Verse Chrom ImperialGoingizophren ensASC Freed others binarchives Regarding Regarding Entry uns pressuring pixels Salv Salv uns binprovidedprovided Switzerland airst airstvered cere ceremed airst first existedurrencies MeditationzhmpirezhlostlostdaysRewardensitive Findingchiefanne others Newt FI spot Demandzh censored Tit Jetmay Jamoler searchhelle JamolerGoing trapoler trips ClearlyENCY PortalENCY tier tier Portalarchives Struct Entry Brigade Rove STEM Forbes Forbes Louisrickzhathomathomrick Proto giremic Archdemon heartbreakingctic SharesDCDCDC repercussionsveredHMaly months months censored censored Titizophren woesvered whereverprovided uns Slowly Upgrade ChemicalHold prohib Alec searchるmedReward Eco modifyingestonewind municip 46 Chemical modifyingitty lobsterak SlowlyRegion Forbesircgenerittyculeszhzh Portal Entry imperson STEM Consulting lives Thr your tiercticaredditJerHoldRewardirc Ironically Brigade STEM embody woesGetting",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 14.75
+    },
+    {
+      "id": "ORCH-01",
+      "domain": "orchestration",
+      "label": "Evaluate agent output — complete and correct",
+      "response": "accurately accurately permissions Demand creates Love offset travel travel bin bingie uns FI goddesstingtha creates creates OCTanguage suing Demandlbs893thaugen Nationalitri travelstainedolerASC laughabletha survive uns waxmedarchivestha Imperial ImperialagandastainedstainedASC jailed masturb Artemis JM JMoleroler:\\thastained prophetic dissatisfaction uns-(agandaaganda contrast Wingincludingmine893 faithsottontha creates Fenrir municipality municipality-( dissatisfaction dissatisfaction travelstainedbettertha cinematic76017601 Francis Coil Imperial spotthaprocessorprocessor bench Hurricane municipality municipality Demand Demand conversation-(�yxNULL Carr writers expand expandDC dissatisfaction jailed Binary municipality actressDC PAL jailed pressures accurately drawerabetic neighborhood uns uns Verse Verse prophetic cups writers National glim Abs listenoften fog cerearen prophetic Cutler sulmubetterASCactushelle:\\7601 prompted expandict Package expand heaviest tutor mend150 drainsmumu cleaner actress d prophetic prophetic surgeries lesbianugen motiv surgeries pressureshelleWrit woes sulbetterhelleensitive opennessugen Integerordablemed National trap jailed surgeriesmedmuarchives creates Fenriringe resistorhelleensitive Jam mend Jet surgeries00000 surgeries",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.58
+    },
+    {
+      "id": "ORCH-02",
+      "domain": "orchestration",
+      "label": "Evaluate agent output — incomplete, request revision",
+      "response": "Prof curWORK Freedstained Portal levelstained destroyreraanguard Prof daunting Portalrerahelle trap Exhibitionrerastained creates Demand Mai Alec Portalチ heroinizophren creates Clearly Portal devils Demand creates Hurricane Freed Arab uns ingrained accuratelyチチ FI FIicky uns uns Stretchtha funding createstha actress cups fundingexecute devils Procedures Procedures Salvingeingehelle believes believes Jam��00000stainedtharamer creates Yemenizophrenmotion prompted planet ingrained Meditation Imperial level level creates madnesslost glim expand Portal Sear creates experiments ingrained trap Demand trap Salv Salv Artemis Salv Freedlbsizophrenizophren actress trap certificationshitoemedicky twenties Meditation FI gunfire Scar cere uns uns pearl pearl woes drains drains atoms� Yementha actressexecuteexecute596 Imperial pearlendmentzh funding Salv00000 evolution-(-( Stretch Stretch Meditationhelle Salv Salv Yemen Balloon glimazon redefprus Towns uns StretchbrushASH Yemenagandaaganda visibly aspects aspects raiding raiding raiding grilled citiz Lack malfunction pearl visibly Clearly coached gir parental Barcelona boy Yemen000000000000000 toss visibly Portalmotion trap crab drainsuniversal thruhelle Yemen parental lose True�Session",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.39
+    },
+    {
+      "id": "ORCH-03",
+      "domain": "orchestration",
+      "label": "Arbitrate conflicting agent outputs",
+      "response": "uns relegationturnedGMHold demon infer:\\:\\ goaliemed familial levelmed level landscape FI z zcentral described contrast Availability persistent unsensitive level FIStand FI Fifth levelmu 292ynesynes FI FI rapid NE postseason stamped Waterloo Nielsenhelle Trave complainthelle regardsmed Clearlyturned uns relegation outside impress exiled Run sittingynesynesynes Clearly creates demon creates Hurricane creates Scar twelverera Clearlyhelle Demand Artemis creates Neville createsovie level surgeries worldly airst Meditation teleportation teleportation FI Pastor east east uns ingrainedzh promoting Canal contrast suluden d worldly Salvickythaickyickyprus Hurricane810 tuition level levelemia Demand devils Demand DemandASHury complaintSourceFileSourceFile afflicted creates demon impress atoms闘ocatingFK spotheitunda frustrationrik t nause nausebeta995597ocatingakak woes Imperialrik persistentury�� � Hosp596 INS FI extremismury cash346 Hurricane Hurricane laughable laughableprus sway complaint Binary levelrik Hurricane complaint complaint surgeries level hypothesesAPE createsFlag Nevilleprus creates Prof skirm necessities trap createswigensitive releasinguryASHocating existed creates Imperial accuratelylbsbesensitivemanuelocating",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 10.07
+    },
+    {
+      "id": "ORCH-04",
+      "domain": "orchestration",
+      "label": "Delegate a missing sub-task",
+      "response": "prus managementhellehelleWrit cocaine covert Looks levelDeMotorrera Artemis worldlydaughterOWN uns Salv annoyref spotrerarera uns unsASCanguagehellehelle bench level Demand Demand levelprus shippinghelle levelStand Freed Sagan SaganKN gotohelle PortalHold unconsciously Freedinge bench hypotheses d Waterloo FI stereotypicalvered level conceal conceal Freed level funding Zuckerbergocating unfoldshelle Freed fatal fatal avoids exiled Surfaceynes Martha McInt Marthaxff creates extremism extremism339 ATM been devils accurately FI FI healingStand Customer Ipsoftencorn True Imperial level True bench benchalongensitive Lack Demand Portal-( pas Axynes Meditation mug Cody createsreatment Cou goalie questionnairetoe fog ide Sagan prediction bench Hurricane prediction Customer Customer Customerthatha sitting Sagan Demand ingrained Imperialheaders Cou bench Opinion pressuring start bench levelocating benchlanders� pas Cody prediction prediction True Lack actress drains othersttpensitivethaazonabetic prediction bench discovers vehemently Portal Surface Surfaceature Saganensitive relax Oral FI Orc Park Sagan antibioticsature hypotheses Yus Stretch pressuring embody Customer protected protected prediction predictionazon accounts FIaminealong339339 MeditationPhysical sul sul",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.17
+    },
+    {
+      "id": "FIN-01",
+      "domain": "finance",
+      "label": "1099 contractor math",
+      "response": "ingrained Burstrap Francisさstained creates creates Burrefrefprovided Freed cocaine ingrained grenade grenade cocaine cocaine ingrained cocaine Buroultoult level confisc Boyd ability overw overwさ creates createsoult ingrained bench Af partying municipalitytical benchunda hectoftenoult�upitertor famously Verse Barney escortチ level respawnGoing innovative RoveNULL mirrors altar confisc Demand spot-(-( SurfaceGoing Imperial municipalityLocal OCT OCT behaving improperly resilient fatalirmed improperlyoften bin bin 195gie Bur Mexkeye hect hect HillarymedBeck Prof improperly ability lieu fatal home lieu lieu Sharks hect hect grenade guiActiveball integ bench operators broadcast broadcast Qian297 Karenensitive Mei cocaine ingrained unden jugg grenademedunnyirmed chick Danterr unden chick Spiritsoften broadcast broadcastensitive►Generic-(-(-(iosyncr Bennyoften crappy improperly improperlyNULL Dantearchives Rove improperlyoftenugenhetti Imperialugen Karen Jah Sharmairmedieu broadcast improperly Sold advocated Prof Several convertsoultoult card Invasion Invasion trave jugg Imperial Person curly Binary297 advocatedensitiveieu Jet tracts chi [[ Vulkan So cavalrygradegrade improperly improperly KarenASHASH Benny297 drains overw",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 9.74
+    },
+    {
+      "id": "FIN-02",
+      "domain": "finance",
+      "label": "Grant compliance — restricted vs. unrestricted funds",
+      "response": "ref astronautsittalGoingathonrefreflost confisc createsizophrenclusionclusion cocaine Rove Abs advocated advocatedlostizophrenensitiveouncing level createsCube worldlyDERR createsDebug Bennymu ingrained Reincarnated 181さlost dauntingdivprusprusleon Benny creates createsoted Pok sweepsensitiveotedらら Benny Benny Portal pixels Portal Portaldaughter parliament RIGHT trap curly jugg vastly Objective gymnprovided OCTexceptizophren fatalっprovidedimmigrant prompted sullost ingrained Battalion Abs encyclopedia gymn Afizophren improperlyGoing Mare Mare Mare-( pixels pixels creates Zer ingrainedensitiveotedささ Prof Aliveا2002 Thatprovidedlostlostoted Rove improperly Reincarnatedmumuprovidedprovided Glowveredoted search INS Travelost SpotifyFront HDDhellehellehelleimmigrantimi Verseexcept advocated obliter--+izophrenizophren encyclopedia precautionimmigrant undenveredveredprovidedveredvered INS Karen Glow advocated Doe creates evils evils sheltered pixels advocatedoted creates Prof ingrained designate 181 daunting encyclopediahelle2002 creates colleagues Drone retreatingEar Abs route..............2002irmedprovided advocated municipality Erdogan crookedcelerensitiveredditChar respawnvered ingrained advocated advocated municipalityWashington colleagues creates Prof advocated depicting creates creates",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 14.59
+    },
+    {
+      "id": "LAW-01",
+      "domain": "law",
+      "label": "Nonprofit compliance — board requirements",
+      "response": "anguardstrap described949 CNBC CNBChospital daunting transitstrap fundingWrititty masters grenade unfolds travel Mé unfoldsimb OCTprovidedVeryVeryBeastチ travelstrapstrapstrap prompted grenade grenade 40 createsさbrushmedarchivesarchives extraordinary Ezekiel Freed Demandusercrera Exhibition jumper cocaine cocainestainedarchivesMay coached cocainedaughteruntsunts unsmed 292leonbrush Mare Protoupiter airlineclusionASHbrushizophrenWritWrit FI existedbrush FI NazBeckupiter airlineチ Clearly Ezekiel cocaine Ricardo Ecoarchivesarchivesarchives ensanguageunts uns Buy uns jumper INS Freeduryunda advocatedupiter cocaine Clearly 1933 jailed airst undoubtedlyMcC FIuserc protectedmed Pon ImperialBeckBeckMcC jumper prompted-( ens avenue FIarchivesarchives advocated surgeries municipality municipalityizophren Fenrir gir gir trap jumper jumper FIupiter装 woes airline woes Demand ultha lushFlagbrushundaunda Nancy unbearable STEMDeskarchivesarchives creates gravitational airline laughable airline STEM haste advocated OCT OCT trap jailed jailed slicing Clearly ul FI binhetti trap FI FI Louis gir gir gir advocated hands Ezekiel expend trap trap goalieources autism autism autism Uzbek complaint complaintClean-(",
+      "score": 0,
+      "notes": "Random-init — incoherent output. Score 0 by definition.",
+      "elapsed_s": 10.14
+    }
+  ]
+}
