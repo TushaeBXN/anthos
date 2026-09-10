@@ -113,8 +113,9 @@ class AnthosConfig:
     lora_rank:         int   = 16
 
     # Auxiliary loss weights (set to 0 to disable)
-    moe_aux_coef:      float = 1e-2
-    act_aux_coef:      float = 1e-3
+    moe_aux_coef:          float = 1e-2
+    act_aux_coef:          float = 1e-3
+    prerouter_loss_coef:   float = 0.05   # KL weight: prerouter head vs real MoE routing
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -585,6 +586,38 @@ class ThoughtTokenPool(nn.Module):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PreRouter Head  (thought → expert-selection lookahead)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PreRouterHead(nn.Module):
+    """
+    Two-layer MLP that reads the final ThoughtTokenPool hidden states after the
+    recurrent loop and predicts which MoE experts will fire for the upcoming
+    sequence-token block.
+
+    Trained via KL divergence against the actual MoE router's per-block expert
+    frequency distribution (whole block, not single next step).  During
+    inference the predicted logits can gate a "predict_one" prefetch policy.
+
+    Architecture: mean-pool(thoughts) → Linear(dim, 2*dim) → GELU
+                  → Linear(2*dim, n_experts)
+    """
+
+    def __init__(self, cfg: AnthosConfig):
+        super().__init__()
+        mid = cfg.dim * 2
+        self.proj = nn.Sequential(
+            nn.Linear(cfg.dim, mid, bias=False),
+            nn.GELU(),
+            nn.Linear(mid, cfg.n_experts, bias=False),
+        )
+
+    def forward(self, thoughts: torch.Tensor) -> torch.Tensor:
+        """thoughts: (B, n_thought, dim) → (B, n_experts) expert-selection logits"""
+        return self.proj(thoughts.mean(dim=1))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Anthos Recurrent Block  (thought + sequence dual-stream)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -633,6 +666,9 @@ class AnthosRecurrentBlock(nn.Module):
         # ACT halting (sequence only — thoughts run every loop)
         self.act = ACTHalting(cfg.dim)
 
+        # PreRouterHead — predicts expert selection from final thought states
+        self.prerouter_head = PreRouterHead(cfg)
+
         # MemoryBank — persistent KV memory that thought tokens attend to (Layer 1)
         # Extends thought stream's effective memory without increasing sequence length.
         # State persists across loop iterations within a forward pass.
@@ -656,8 +692,8 @@ class AnthosRecurrentBlock(nn.Module):
         n_loops:      Optional[int]              = None,
         kv_cache:     Optional[dict]             = None,
         memory_state: Optional[MemoryBankState]  = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor]:
-        """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used). All differentiable."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor, torch.Tensor]:
+        """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux). All differentiable."""
         n_loops = n_loops or self.cfg.max_loop_iters
 
         B, T, D = h.shape
@@ -707,7 +743,26 @@ class AnthosRecurrentBlock(nn.Module):
                 break
 
         act_aux = loops_used.mean()  # differentiable ACT penalty
-        return h_out, moe_aux_total, act_aux, memory_state, loops_used
+
+        # ── PreRouter aux loss ────────────────────────────────────────────────
+        # Predict expert selection from final thought states and compare against
+        # the actual MoE routing for the whole sequence block (all T positions).
+        prerouter_logits = self.prerouter_head(thoughts)  # (B, n_experts)
+        prerouter_log_p  = F.log_softmax(prerouter_logits, dim=-1)
+
+        # Reconstruct per-batch expert frequency over the sequence token portion
+        # of the last loop's routing decisions. _last_topk_idx: (B*(n_thought+T), topk)
+        topk_idx  = self.block.ffn._last_topk_idx             # (B*(n_thought+T), topk) detached
+        n_exp     = self.cfg.n_experts
+        topk_idx_block = topk_idx.view(B, -1, self.block.ffn.topk)  # (B, n_thought+T, topk)
+        seq_topk       = topk_idx_block[:, self.n_thought:, :].reshape(B, -1)  # (B, T*topk)
+        actual_dist    = torch.zeros(B, n_exp, device=h.device)
+        actual_dist.scatter_add_(1, seq_topk, torch.ones_like(seq_topk, dtype=actual_dist.dtype))
+        actual_dist    = actual_dist / actual_dist.sum(-1, keepdim=True).clamp(min=1e-8)
+
+        prerouter_aux = F.kl_div(prerouter_log_p, actual_dist.detach(), reduction='batchmean')
+
+        return h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -844,11 +899,12 @@ class Anthos(nn.Module):
         # ── Anthos Recurrent Block ────────────────────────────────────────
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
-        x, moe_aux, act_aux, memory_state, loops_used = self.recurrent(
+        x, moe_aux, act_aux, memory_state, loops_used, prerouter_aux = self.recurrent(
             x, thoughts, e, freqs_cis, n_loops, kv_cache, memory_state
         )
-        self._last_memory_state = memory_state   # expose for stateful inference wrappers
-        self._last_loops_used   = loops_used     # expose for EAFT loss weighting
+        self._last_memory_state  = memory_state    # expose for stateful inference wrappers
+        self._last_loops_used    = loops_used      # expose for EAFT loss weighting
+        self._last_prerouter_aux = prerouter_aux   # expose for diagnostics
 
         # ── Coda ──────────────────────────────────────────────────────────
         for i, layer in enumerate(self.coda):
@@ -861,7 +917,9 @@ class Anthos(nn.Module):
         if not return_aux:
             return logits
 
-        aux_loss = self.cfg.moe_aux_coef * moe_aux + self.cfg.act_aux_coef * act_aux
+        aux_loss = (self.cfg.moe_aux_coef      * moe_aux       +
+                    self.cfg.act_aux_coef      * act_aux       +
+                    self.cfg.prerouter_loss_coef * prerouter_aux)
         return logits, aux_loss
 
     def get_hidden_states(self) -> torch.Tensor:
@@ -959,8 +1017,11 @@ def _base(overrides: dict) -> AnthosConfig:
 
 
 # n_thought_tokens scales with model size — more parameters = richer working memory
-def anthos_1b()   -> AnthosConfig: return _base(dict(dim=2048, n_heads=16, n_experts=64,  expert_dim=2048, max_loop_iters=16, max_seq_len=4096,   vocab_size=50262, n_thought_tokens=16))
-def anthos_3b()   -> AnthosConfig: return _base(dict(dim=3072, n_heads=24, n_experts=64,  expert_dim=4096, max_loop_iters=16, max_seq_len=4096,   vocab_size=50262, n_thought_tokens=24))
-def anthos_10b()  -> AnthosConfig: return _base(dict(dim=4096, n_heads=32, n_experts=128, expert_dim=5632, max_loop_iters=24, max_seq_len=8192,   vocab_size=50262, n_thought_tokens=32))
-def anthos_50b()  -> AnthosConfig: return _base(dict(dim=6144, n_heads=48, n_experts=256, expert_dim=9728, max_loop_iters=32, max_seq_len=8192,   vocab_size=50262, n_thought_tokens=48))
-def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568,max_loop_iters=32, max_seq_len=1_000_000, vocab_size=50262, n_thought_tokens=64))
+# MoE note: only n_experts_per_tok=4 experts fire per token, so active params << total params.
+# anthos_35b: ~35B total, ~3B active per token — strong reasoning + synthesis sweet spot.
+def anthos_1b()   -> AnthosConfig: return _base(dict(dim=2048, n_heads=16, n_experts=64,  expert_dim=2048,  max_loop_iters=16, max_seq_len=4096,      vocab_size=50262, n_thought_tokens=16))
+def anthos_3b()   -> AnthosConfig: return _base(dict(dim=3072, n_heads=24, n_experts=64,  expert_dim=4096,  max_loop_iters=16, max_seq_len=4096,      vocab_size=50262, n_thought_tokens=24))
+def anthos_10b()  -> AnthosConfig: return _base(dict(dim=4096, n_heads=32, n_experts=128, expert_dim=5632,  max_loop_iters=24, max_seq_len=8192,      vocab_size=50262, n_thought_tokens=32))
+def anthos_35b()  -> AnthosConfig: return _base(dict(dim=5120, n_heads=40, n_experts=256, expert_dim=7680,  max_loop_iters=28, max_seq_len=8192,      vocab_size=50262, n_thought_tokens=40))
+def anthos_50b()  -> AnthosConfig: return _base(dict(dim=6144, n_heads=48, n_experts=256, expert_dim=9728,  max_loop_iters=32, max_seq_len=8192,      vocab_size=50262, n_thought_tokens=48))
+def anthos_100b() -> AnthosConfig: return _base(dict(dim=8192, n_heads=64, n_experts=256, expert_dim=13568, max_loop_iters=32, max_seq_len=1_000_000, vocab_size=50262, n_thought_tokens=64))
