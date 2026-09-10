@@ -189,3 +189,34 @@ class TestLearning:
         # Modifying a should not affect b (contiguous clone)
         a[0, 0, 0] = 999.0
         assert b[0, 0, 0].item() != 999.0
+
+
+class TestHaltProbs:
+    """Verify halt_probs is present, correctly shaped, and well-formed."""
+
+    def test_halt_probs_present(self, model, ids):
+        model(ids, n_loops=4)
+        assert hasattr(model, "halt_probs"), "halt_probs must be set on model after forward"
+
+    def test_halt_probs_shape(self, model, cfg, ids):
+        B, T = ids.shape
+        n_loops = 4
+        model(ids, n_loops=n_loops)
+        hp = model.halt_probs
+        assert hp.shape == (B, T, n_loops), (
+            f"Expected halt_probs shape {(B, T, n_loops)}, got {hp.shape}"
+        )
+
+    def test_halt_probs_values_in_range(self, model, ids):
+        model(ids, n_loops=4)
+        hp = model.halt_probs
+        assert hp.min().item() >= 0.0, "halt_probs must be non-negative"
+        assert hp.max().item() <= 1.0, "halt_probs must be <= 1 (sigmoid output)"
+
+    def test_halt_probs_shape_across_loop_depths(self, model, cfg, ids):
+        for n in [1, 3, 6]:
+            model(ids, n_loops=n)
+            hp = model.halt_probs
+            assert hp.shape == (ids.shape[0], ids.shape[1], n), (
+                f"halt_probs shape mismatch at n_loops={n}: {hp.shape}"
+            )

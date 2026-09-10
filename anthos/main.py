@@ -692,8 +692,13 @@ class AnthosRecurrentBlock(nn.Module):
         n_loops:      Optional[int]              = None,
         kv_cache:     Optional[dict]             = None,
         memory_state: Optional[MemoryBankState]  = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor, torch.Tensor]:
-        """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux). All differentiable."""
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux, halt_probs).
+
+        halt_probs: (B, T, max_loop_iters) — per-position halting probability at each loop step;
+                    zero for steps that did not execute (early termination or already halted).
+                    Stable output contract — always present regardless of n_loops or early exit.
+        """
         n_loops = n_loops or self.cfg.max_loop_iters
 
         B, T, D = h.shape
@@ -701,6 +706,7 @@ class AnthosRecurrentBlock(nn.Module):
         cumulative_p = torch.zeros(B, T,    device=h.device)
         h_out        = torch.zeros_like(h)
         loops_used   = torch.zeros(B, T,    device=h.device)
+        halt_probs   = torch.zeros(B, T, n_loops, device=h.device)  # (B, T, max_loop_iters)
 
         e_normed      = self.e_norm(e)
         e_summary     = e.mean(dim=1)                                        # [B, D] — cold-start conditioning for MemoryBank
@@ -734,6 +740,8 @@ class AnthosRecurrentBlock(nn.Module):
                 cumulative_p + p >= self.cfg.act_threshold, remainder, p,
             ) * still_running.float()
 
+            halt_probs[:, :, t] = p * still_running.float()  # zero out already-halted positions
+
             h_out        = h_out        + weight.unsqueeze(-1) * h
             cumulative_p = cumulative_p + p * still_running.float()
             halted       = halted       | (cumulative_p >= self.cfg.act_threshold)
@@ -762,7 +770,7 @@ class AnthosRecurrentBlock(nn.Module):
 
         prerouter_aux = F.kl_div(prerouter_log_p, actual_dist.detach(), reduction='batchmean')
 
-        return h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux
+        return h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux, halt_probs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -899,12 +907,13 @@ class Anthos(nn.Module):
         # ── Anthos Recurrent Block ────────────────────────────────────────
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
-        x, moe_aux, act_aux, memory_state, loops_used, prerouter_aux = self.recurrent(
+        x, moe_aux, act_aux, memory_state, loops_used, prerouter_aux, halt_probs = self.recurrent(
             x, thoughts, e, freqs_cis, n_loops, kv_cache, memory_state
         )
         self._last_memory_state  = memory_state    # expose for stateful inference wrappers
         self._last_loops_used    = loops_used      # expose for EAFT loss weighting
         self._last_prerouter_aux = prerouter_aux   # expose for diagnostics
+        self.halt_probs          = halt_probs      # (B, T, max_loop_iters) — stable output contract
 
         # ── Coda ──────────────────────────────────────────────────────────
         for i, layer in enumerate(self.coda):
