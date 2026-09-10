@@ -111,12 +111,14 @@ class TelemetryHarness:
     def __init__(
         self,
         model_cfg,                      # AnthosConfig — used for device/dim
-        hardware:  str       = "cpu_only",
-        tel_cfg:   TelemetryConfig = None,
+        hardware:   str            = "cpu_only",
+        tel_cfg:    TelemetryConfig = None,
+        stage_tag:  str            = "",
     ):
         self.model_cfg  = model_cfg
         self.hardware   = hardware
         self.tel_cfg    = tel_cfg or TelemetryConfig()
+        self.stage_tag  = stage_tag   # e.g. "stage1_40pct_195M_tokens"
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -138,6 +140,7 @@ class TelemetryHarness:
         results = {
             "step":          step,
             "hardware":      self.hardware,
+            "stage_tag":     self.stage_tag,
             "ckpt_path":     str(ckpt_path),
             "torch_version": torch.__version__,
             "device":        str(device),

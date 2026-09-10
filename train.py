@@ -112,7 +112,11 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         _hardware_label = gpu_name.replace(" ", "_")
     else:
         _hardware_label = "cpu_only"
-    _telemetry_harness = TelemetryHarness(model_cfg, hardware=_hardware_label)
+    # Stage tag: embedded in every telemetry sidecar so checkpoints stay
+    # comparable even after higher-budget runs exist alongside them.
+    _stage_tag = f"{tier}_stage1_40pct_195M_tokens" if tier == "sft" else tier
+    _telemetry_harness = TelemetryHarness(model_cfg, hardware=_hardware_label,
+                                          stage_tag=_stage_tag)
 
     # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):
