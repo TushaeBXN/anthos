@@ -27,6 +27,7 @@ from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
 from anthos.distill       import DistillConfig, DistillationLoss, TeacherLabelDataset
 from anthos.eaft          import EAFTLoss
+from anthos.telemetry     import TelemetryHarness
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
@@ -104,6 +105,14 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     model_cfg, train_cfg = get_training_config(tier)
     device   = "cuda" if torch.cuda.is_available() else "cpu"
     ckpt_dir = Path("checkpoints") / train_cfg.run_name
+
+    # Determine hardware label for telemetry sidecar
+    if torch.cuda.is_available():
+        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown_gpu"
+        _hardware_label = gpu_name.replace(" ", "_")
+    else:
+        _hardware_label = "cpu_only"
+    _telemetry_harness = TelemetryHarness(model_cfg, hardware=_hardware_label)
 
     # ── Tier-specific overrides ───────────────────────────────────────────────
     if tier in ("sft", "instruct"):
@@ -286,6 +295,19 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             dataset_name = local_data
             max_samples  = 0
             print(f"  ✓ Code tier: loading {local_data}")
+        elif tier == "sft" or tier == "instruct":
+            # Use whatever data path configs.py resolved (sft_master.jsonl first)
+            local_data = train_cfg.dataset
+            if Path(local_data).exists():
+                dataset_name = local_data
+                max_samples  = 0
+                n_lines = sum(1 for _ in open(local_data)) if Path(local_data).exists() else 0
+                print(f"  ✓ SFT tier: loading {local_data} ({n_lines:,} pairs)")
+            else:
+                raise FileNotFoundError(
+                    f"SFT data not found: {local_data}\n"
+                    f"Expected data/sft_master.jsonl — run ingest scripts first."
+                )
         elif tier == "convo_smoke":
             local_data = "data/teacher_conversations.jsonl"
             if Path(local_data).exists():
@@ -418,7 +440,13 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             t0 = t1
 
         if step % SAVE_EVERY == 0:
-            save_checkpoint(ckpt_dir / f"step_{step:06d}.pt", model, optimizer, step, avg_loss)
+            _ckpt_path = ckpt_dir / f"step_{step:06d}.pt"
+            save_checkpoint(_ckpt_path, model, optimizer, step, avg_loss)
+            try:
+                _telemetry_harness.record(model, tokenizer=None, ckpt_path=str(_ckpt_path), step=step)
+                print(f"  ✓ Telemetry sidecar written → {_ckpt_path}.telemetry.json")
+            except Exception as _te:
+                print(f"  ⚠ Telemetry skipped: {_te}")
             print("\n── Sample outputs ─────────────────────────────────────")
             try:
                 for sample in generate_samples(model, device, n_loops, tokenizer_path=tok_path):
