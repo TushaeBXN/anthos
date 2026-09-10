@@ -22,6 +22,12 @@ model      = None
 tokenizer  = None
 load_lock  = threading.Lock()
 
+# Memory + capabilities (loaded lazily alongside the model)
+_brain     = None
+_retrieval = None
+_toolbox   = None
+_multilang = None
+
 # ── Native arch helpers (from chat_native.py) ──────────────────────────────
 SYS_ID, USR_ID, THT_ID, AST_ID, END_ID = 50257, 50258, 50259, 50260, 50261
 SYSTEM_NATIVE = (
@@ -55,16 +61,63 @@ def load_native(checkpoint_path=None, tier="identity_hardening"):
     model     = m
     tokenizer = AT.from_pretrained("data/anthos_tokenizer")
     model_type = "native"
+
+    # Wire in memory + capabilities
+    global _brain, _retrieval, _toolbox, _multilang
+    from anthos.synapse import Synapse
+    from anthos import retrieval as _retrieval
+    from anthos import toolbox   as _toolbox
+    from anthos import multilingual as _multilang
+    _brain = Synapse.load()
+
     return True, checkpoint_path
 
 
 
 def generate_native(user_text, max_new_tokens=200, n_loops=8):
     spec = {SYS_ID, USR_ID, THT_ID, AST_ID, END_ID}
-    sys_ids = tokenizer.encode(SYSTEM_NATIVE, add_special_tokens=False)
-    usr_ids = tokenizer.encode(user_text,     add_special_tokens=False)
+
+    # Build dynamic system prompt
+    system = SYSTEM_NATIVE
+    if _brain:
+        system += _brain.context_injection()
+
+    # Language detection
+    lang_note = ""
+    if _multilang:
+        lang = _multilang.detect_language(user_text)
+        lang_note = _multilang.language_directive(lang)
+
+    # Tool dispatch
+    tool_context = ""
+    if _toolbox:
+        tool_name, tool_arg = _toolbox.detect_tool(user_text)
+        if tool_name:
+            result = _toolbox.run_tool(tool_name, tool_arg)
+            tool_context = "\n\n" + _toolbox.format_tool_context(tool_name, result)
+
+    # RAG retrieval
+    rag_context = ""
+    if _retrieval and not tool_context and _retrieval.needs_retrieval(user_text):
+        ctx = _retrieval.retrieve(user_text)
+        if ctx:
+            rag_context = "\n\n" + ctx
+
+    dynamic_system = system + lang_note + tool_context + rag_context
+
+    # Build history from Synapse
+    history_ids: list[int] = []
+    if _brain:
+        for prev_user, prev_ast in _brain.as_tuple_history():
+            pu = tokenizer.encode(prev_user, add_special_tokens=False)
+            pa = tokenizer.encode(prev_ast,  add_special_tokens=False)
+            history_ids += [USR_ID] + pu + [END_ID] + [AST_ID] + pa + [END_ID]
+
+    sys_ids = tokenizer.encode(dynamic_system, add_special_tokens=False)
+    usr_ids = tokenizer.encode(user_text,      add_special_tokens=False)
     ids = (
         [SYS_ID] + sys_ids + [END_ID] +
+        history_ids +
         [USR_ID] + usr_ids + [END_ID] +
         [THT_ID, END_ID] + [AST_ID]
     )
@@ -77,7 +130,15 @@ def generate_native(user_text, max_new_tokens=200, n_loops=8):
     eos = tokenizer.eos_token_id
     if eos in clean:
         clean = clean[:clean.index(eos)]
-    return tokenizer.decode(clean, skip_special_tokens=True).strip()
+    response = tokenizer.decode(clean, skip_special_tokens=True).strip()
+
+    # Save to Synapse memory
+    if _brain:
+        _brain.add_turn("user",      user_text)
+        _brain.add_turn("assistant", response)
+        _brain.save()
+
+    return response
 
 
 
@@ -98,7 +159,7 @@ def load_model_route():
 def chat_route():
     if model is None:
         return jsonify({"error": "No model loaded. Click Load Model first."}), 400
-    user_text = request.json.get("message", "").strip()
+    user_text = (request.json or {}).get("message", "").strip()
     if not user_text:
         return jsonify({"error": "Empty message"}), 400
     try:
@@ -110,16 +171,104 @@ def chat_route():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/chat/stream", methods=["POST"])
+def chat_stream_route():
+    """Server-Sent Events streaming endpoint — tokens appear as they generate."""
+    if model is None:
+        return jsonify({"error": "No model loaded."}), 400
+    user_text = (request.json or {}).get("message", "").strip()
+    if not user_text:
+        return jsonify({"error": "Empty message"}), 400
+
+    def generate():
+        import json as _json
+
+        # Build context (same as generate_native)
+        system = SYSTEM_NATIVE
+        if _brain:
+            system += _brain.context_injection()
+        lang_note = _multilang.language_directive(_multilang.detect_language(user_text)) if _multilang else ""
+        tool_context = ""
+        if _toolbox:
+            tool_name, tool_arg = _toolbox.detect_tool(user_text)
+            if tool_name:
+                result = _toolbox.run_tool(tool_name, tool_arg)
+                tool_context = "\n\n" + _toolbox.format_tool_context(tool_name, result)
+        rag_context = ""
+        if _retrieval and not tool_context and _retrieval.needs_retrieval(user_text):
+            ctx = _retrieval.retrieve(user_text)
+            if ctx:
+                rag_context = "\n\n" + ctx
+
+        dynamic_system = system + lang_note + tool_context + rag_context
+
+        spec = {SYS_ID, USR_ID, THT_ID, AST_ID, END_ID}
+        history_ids: list[int] = []
+        if _brain:
+            for pu, pa in _brain.as_tuple_history():
+                h_u = tokenizer.encode(pu, add_special_tokens=False)
+                h_a = tokenizer.encode(pa, add_special_tokens=False)
+                history_ids += [USR_ID] + h_u + [END_ID] + [AST_ID] + h_a + [END_ID]
+
+        sys_ids = tokenizer.encode(dynamic_system, add_special_tokens=False)
+        usr_ids = tokenizer.encode(user_text, add_special_tokens=False)
+        import torch as _torch
+        ids = ([SYS_ID] + sys_ids + [END_ID] + history_ids +
+               [USR_ID] + usr_ids + [END_ID] + [THT_ID, END_ID] + [AST_ID])
+        prompt = _torch.tensor([ids], dtype=_torch.long)
+
+        # Stream token by token
+        full_response = []
+        eos = tokenizer.eos_token_id
+        with _torch.no_grad():
+            for tok_id in model.generate_stream(prompt, max_new_tokens=200, n_loops=8,
+                                                 temperature=0.7, top_k=40):
+                if tok_id in spec or tok_id == eos:
+                    break
+                text = tokenizer.decode([tok_id], skip_special_tokens=True)
+                full_response.append(text)
+                yield f"data: {_json.dumps({'token': text})}\n\n"
+
+        response = "".join(full_response).strip()
+        if _brain and response:
+            _brain.add_turn("user",      user_text)
+            _brain.add_turn("assistant", response)
+            _brain.save()
+
+        yield f"data: {_json.dumps({'done': True, 'full': response})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream",
+                    headers={"X-Accel-Buffering": "no",
+                             "Cache-Control": "no-cache"})
+
+
 @app.route("/clear", methods=["POST"])
 def clear_route():
-    history.clear()
+    if _brain:
+        _brain.new_session()
+        _brain.save()
     return jsonify({"ok": True})
 
 
 @app.route("/status")
 def status_route():
     return jsonify({
-        "loaded": model is not None,
+        "loaded":    model is not None,
+        "memory":    _brain is not None,
+        "retrieval": _retrieval is not None,
+        "tools":     _toolbox is not None,
+        "multilang": _multilang is not None,
+    })
+
+
+@app.route("/memory", methods=["GET"])
+def memory_route():
+    if not _brain:
+        return jsonify({"facts": [], "turns": 0})
+    return jsonify({
+        "facts": _brain.user_facts,
+        "turns": len(_brain.turns),
+        "compressed_batches": len(_brain.compressed),
     })
 
 
@@ -484,26 +633,74 @@ async function sendMessage() {
   busy = true;
   document.getElementById('send-btn').disabled = true;
 
-  const who      = activeModel === 'amy' ? 'amy' : 'anthos';
-  const endpoint = activeModel === 'amy' ? '/amy/chat' : '/chat';
-  const typingId = appendTyping(who);
+  const who = activeModel === 'amy' ? 'amy' : 'anthos';
 
-  const res  = await fetch(endpoint, {
-    method: 'POST',
-    headers: {'Content-Type':'application/json'},
-    body: JSON.stringify({message: text})
-  });
-  const data = await res.json();
+  if (activeModel === 'amy') {
+    const typingId = appendTyping('amy');
+    const res  = await fetch('/amy/chat', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({message: text})
+    });
+    const data = await res.json();
+    removeTyping(typingId);
+    busy = false;
+    document.getElementById('send-btn').disabled = false;
+    if (data.error) appendMsg('amy', '⚠ ' + data.error, true);
+    else appendMsg('amy', data.reply);
+    return;
+  }
 
-  removeTyping(typingId);
+  // Anthos — streaming via SSE
+  const bubble = appendStreamBubble('anthos');
+  let accumulated = '';
+
+  try {
+    const res = await fetch('/chat/stream', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({message: text})
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const d = JSON.parse(line.slice(6));
+          if (d.token) {
+            accumulated += d.token;
+            bubble.textContent = accumulated;
+            bubble.closest('#messages').scrollTop = 999999;
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    // Fallback to non-streaming
+    try {
+      const res  = await fetch('/chat', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({message: text})
+      });
+      const data = await res.json();
+      bubble.textContent = data.reply || ('⚠ ' + data.error);
+    } catch(e2) {
+      bubble.textContent = '⚠ Connection error';
+    }
+  }
+
   busy = false;
   document.getElementById('send-btn').disabled = false;
-
-  if (data.error) {
-    appendMsg(who, '⚠ ' + data.error, true);
-  } else {
-    appendMsg(who, data.reply);
-  }
 }
 
 async function clearHistory() {
@@ -526,6 +723,20 @@ function appendMsg(who, text, isError=false) {
   msgs.appendChild(div);
   msgs.scrollTop = msgs.scrollHeight;
   return div;
+}
+
+function appendStreamBubble(who) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  const label = who === 'amy' ? 'AMY' : 'A';
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble streaming';
+  div.innerHTML = `<div class="avatar">${label}</div>`;
+  div.appendChild(bubble);
+  const msgs = document.getElementById('messages');
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return bubble;
 }
 
 let typingCounter = 0;

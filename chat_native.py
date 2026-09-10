@@ -127,9 +127,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained("data/anthos_tokenizer")
     model     = load_model(args.checkpoint, tier=args.tier)
 
-    # Load guardrails — same system used in serve.py
+    # Load guardrails, retrieval, tools, multilingual
     from anthos.guardrails import GuardrailSystem
     from anthos.synapse import Synapse
+    from anthos.retrieval import retrieve, needs_retrieval
+    from anthos.toolbox import detect_tool, run_tool, format_tool_context
+    from anthos.multilingual import detect_language, language_directive
     guardrails = GuardrailSystem()
 
     total_params = sum(p.numel() for p in model.parameters())
@@ -176,8 +179,29 @@ def main():
             print(f"Anthos: {sanitized_user}\n")
             continue
 
+        # Language detection
+        lang = detect_language(sanitized_user)
+        lang_note = language_directive(lang)
+
+        # Tool dispatch — run before model, inject result as context
+        tool_context = ""
+        tool_name, tool_arg = detect_tool(sanitized_user)
+        if tool_name:
+            tool_result = run_tool(tool_name, tool_arg)
+            tool_context = "\n\n" + format_tool_context(tool_name, tool_result)
+            print(f"  [tool:{tool_name}] ", end="", flush=True)
+
+        # RAG retrieval — inject live web context when query needs it
+        rag_context = ""
+        if not tool_name and needs_retrieval(sanitized_user):
+            rag_context = "\n\n" + retrieve(sanitized_user)
+            if rag_context.strip():
+                print("  [retrieved] ", end="", flush=True)
+
+        dynamic_system = system_with_context + lang_note + tool_context + rag_context
+
         history = brain.as_tuple_history()
-        prompt_ids = build_prompt(tokenizer, system_with_context, sanitized_user, history=history)
+        prompt_ids = build_prompt(tokenizer, dynamic_system, sanitized_user, history=history)
         print("Anthos: ", end="", flush=True)
 
         response = generate_response(model, tokenizer, prompt_ids,
