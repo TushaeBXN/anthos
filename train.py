@@ -44,6 +44,44 @@ LOG_EVERY    = 100
 SAVE_EVERY   = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────
+# MoE collapse monitor — configurable thresholds + auto-bump
+# ─────────────────────────────────────────────────────────────────────────────
+MOE_WARN_THRESHOLD  = 0.50   # WARN if top-1 expert captures > 50% of routing mass
+MOE_BUMP_THRESHOLD  = 0.60   # auto-bump moe_aux_coef if top-1 > 60%
+MOE_BUMP_MULTIPLIER = 2.0    # new coef = old coef * multiplier (0.01 → 0.02)
+
+
+def check_moe_collapse(model, model_cfg, step: int) -> float:
+    """
+    Inspect the cached top-k routing indices from the last forward pass.
+    Returns the fraction of routing mass going to the single busiest expert.
+
+    Side-effects:
+      - Prints WARN if fraction > MOE_WARN_THRESHOLD
+      - Auto-bumps model_cfg.moe_aux_coef if fraction > MOE_BUMP_THRESHOLD
+        (the model reads cfg.moe_aux_coef each step via aux_loss calculation)
+    """
+    try:
+        topk_idx = model.recurrent.block.ffn._last_topk_idx  # (N, topk) int
+        if topk_idx is None:
+            return 0.0
+        n_experts = model_cfg.n_experts
+        counts = torch.bincount(topk_idx.reshape(-1), minlength=n_experts).float()
+        top1_frac = (counts.max() / counts.sum()).item()
+
+        if top1_frac > MOE_BUMP_THRESHOLD:
+            old_coef = model_cfg.moe_aux_coef
+            model_cfg.moe_aux_coef = round(old_coef * MOE_BUMP_MULTIPLIER, 6)
+            print(f"  ⚡ MoE collapse at step {step}: top-1={top1_frac:.1%} > {MOE_BUMP_THRESHOLD:.0%} — "
+                  f"auto-bumped moe_aux_coef {old_coef} → {model_cfg.moe_aux_coef}", flush=True)
+        elif top1_frac > MOE_WARN_THRESHOLD:
+            print(f"  ⚠ MoE routing: top-1 expert at {top1_frac:.1%} (warn threshold {MOE_WARN_THRESHOLD:.0%})", flush=True)
+
+        return top1_frac
+    except Exception:
+        return 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Logic Functions
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -186,11 +224,27 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     )
     thought_collector.attach()
 
+    # ── Which heads are active this run? (resolve ambiguity before training) ──
+    _has_prerouter = hasattr(model.recurrent, "prerouter_head")
+    _has_halt_probs = hasattr(model, "halt_probs") or True  # always exposed via forward
     print(f"\n{'─'*60}")
     print(f"  Anthos — Sovereign Training (Mansa Edition)")
+    print(f"  Tier:       {tier}")
     print(f"  Parameters: {total_params:,}")
     print(f"  Max Steps:  {MAX_STEPS:,} | Warmup: {WARMUP_STEPS}")
     print(f"  Max LR:     {MAX_LR} | Loops: {PHASE1_LOOPS}->{PHASE2_LOOPS}")
+    print(f"  Stage tag:  {_stage_tag}")
+    print(f"  ── Active heads ──────────────────────────────────")
+    print(f"    PreRouterHead : {'YES — KL aux loss active' if _has_prerouter else 'NO'}")
+    print(f"    halt_probs    : YES — (B,T,n_loops) exposed on model.halt_probs")
+    print(f"    LoRA recovery : wired in distill.py (not active this tier)")
+    print(f"  ── MoE collapse monitor ──────────────────────────")
+    print(f"    WARN at {MOE_WARN_THRESHOLD:.0%} | AUTO-BUMP at {MOE_BUMP_THRESHOLD:.0%} (×{MOE_BUMP_MULTIPLIER})")
+    if tier == "sft":
+        print(f"  ── Stage 1 expectations ──────────────────────────")
+        print(f"    ~20% Chinchilla budget (195M / 960M tokens)")
+        print(f"    Hallucination and short-context loss are EXPECTED — not bugs")
+        print(f"    Goal: validate loss curve shape, ACT stability, MoE routing spread")
     print(f"{'─'*60}\n")
 
     use_fused = True if device == "cuda" else False
@@ -353,10 +407,10 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
     data_iter = iter(loader)
     model.train()
-    step       = start_step
-    loss_accum = aux_accum = 0.0
-    avg_loss   = 0.0
-    t0         = time.time()
+    step              = start_step
+    loss_accum        = aux_accum = prerouter_accum = 0.0
+    avg_loss          = 0.0
+    t0                = time.time()
 
     print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
     print(f"  ⏳ First log will appear after step {LOG_EVERY} (may take 1-2 min on CPU)...", flush=True)
@@ -427,28 +481,46 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                     loss = (ce + aux + rep_pen + div_pen) / train_cfg.grad_accum
 
             loss.backward()
-            loss_accum += ce.item()
-            aux_accum  += aux.item()
+            loss_accum      += ce.item()
+            aux_accum       += aux.item()
+            prerouter_accum += getattr(model, "_last_prerouter_aux", torch.tensor(0.0)).item()
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
         step += 1
 
         if step % LOG_EVERY == 0:
-            t1       = time.time()
-            avg_loss = loss_accum / (LOG_EVERY * train_cfg.grad_accum)
-            avg_aux  = aux_accum  / (LOG_EVERY * train_cfg.grad_accum)
-            tok_sec  = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
-            print(f"step {step:6d} | loss {avg_loss:.4f} | ponder {avg_aux:.5f} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s", flush=True)
-            loss_accum = aux_accum = 0.0
+            t1            = time.time()
+            avg_loss      = loss_accum      / (LOG_EVERY * train_cfg.grad_accum)
+            avg_aux       = aux_accum       / (LOG_EVERY * train_cfg.grad_accum)
+            avg_prerouter = prerouter_accum / (LOG_EVERY * train_cfg.grad_accum)
+            tok_sec       = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
+            top1_frac     = check_moe_collapse(model, model_cfg, step)
+            print(
+                f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
+                f"prerouter_kl {avg_prerouter:.4f} | moe_top1 {top1_frac:.1%} | "
+                f"loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s",
+                flush=True,
+            )
+            loss_accum = aux_accum = prerouter_accum = 0.0
             t0 = t1
 
         if step % SAVE_EVERY == 0:
             _ckpt_path = ckpt_dir / f"step_{step:06d}.pt"
             save_checkpoint(_ckpt_path, model, optimizer, step, avg_loss)
             try:
-                _telemetry_harness.record(model, tokenizer=None, ckpt_path=str(_ckpt_path), step=step)
-                print(f"  ✓ Telemetry sidecar written → {_ckpt_path}.telemetry.json")
+                _tel = _telemetry_harness.record(model, tokenizer=None, ckpt_path=str(_ckpt_path), step=step)
+                # Attach training-loop scalars so the sidecar captures the live run state
+                _tel["train_scalars"] = {
+                    "loss":         round(avg_loss,      5),
+                    "aux":          round(avg_aux,        5),
+                    "prerouter_kl": round(avg_prerouter,  5),
+                    "moe_aux_coef": model_cfg.moe_aux_coef,
+                }
+                import json as _json
+                _sidecar_path = str(_ckpt_path).replace(".pt", ".telemetry.json")
+                Path(_sidecar_path).write_text(_json.dumps(_tel, indent=2))
+                print(f"  ✓ Telemetry sidecar written → {_sidecar_path}")
             except Exception as _te:
                 print(f"  ⚠ Telemetry skipped: {_te}")
             print("\n── Sample outputs ─────────────────────────────────────")
