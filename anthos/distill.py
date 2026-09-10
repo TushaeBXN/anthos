@@ -407,3 +407,305 @@ class OnlineDistiller:
         info["total_loss"] = total.item()
 
         return total, info
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Int4-Recovery LoRA  (Chimera pipeline — same trace, two outputs)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Problem: int4 quantization of Anthos (or any base model) introduces
+# rounding error in every linear layer.  A small LoRA delta trained on the
+# same teacher-trace data the SFT run uses can recover most of that error
+# without duplicating data generation or running the teacher twice.
+#
+# Design:
+#   1. Load base checkpoint in int4 (requires bitsandbytes ≥ 0.43 on GPU;
+#      falls back to float32 when unavailable — same code path, lower fidelity).
+#   2. Inject LoRALinear wrappers around every nn.Linear in the base model;
+#      only the LoRA delta weights (A, B) are trainable.
+#   3. ChimeraTrainer shares one run_id and one DataLoader between the SFT
+#      student and the recovery LoRA model — the batch is forwarded through
+#      both in the same step, so the teacher is queried only once per batch.
+#
+# Saving:
+#   checkpoints/<run_id>/sft/step_XXXXXX.pt        — SFT student checkpoint
+#   checkpoints/<run_id>/lora/step_XXXXXX_lora.pt  — LoRA delta weights only
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class RecoveryLoRAConfig:
+    rank:          int   = 16       # LoRA rank for all injected adapters
+    alpha:         float = 32.0     # LoRA scaling: delta = (alpha/rank) * B @ A
+    target_modules: list = field(default_factory=lambda: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
+    dropout:       float = 0.05
+    use_int4:      bool  = True     # Load base weights in int4 (requires bitsandbytes)
+    loss_coef:     float = 1.0      # Weight on recovery LoRA loss relative to SFT loss
+
+
+@dataclass
+class ChimeraConfig:
+    """Bundles SFT distillation + int4-recovery LoRA under one run ID."""
+    distill:       DistillConfig      = field(default_factory=DistillConfig)
+    recovery:      RecoveryLoRAConfig = field(default_factory=RecoveryLoRAConfig)
+    run_id:        str                = "chimera_run"
+    checkpoint_dir: str              = "checkpoints"
+    save_every:    int                = 500
+
+
+class LoRALinear(nn.Module):
+    """
+    Drop-in replacement for nn.Linear that adds a trainable low-rank delta.
+
+    output = frozen_linear(x) + (alpha/rank) * x @ A^T @ B^T
+
+    Frozen base weights stay at their original dtype (int4 or float32).
+    A and B are always float32 for numerical stability during training.
+    """
+
+    def __init__(self, base: nn.Linear, rank: int, alpha: float, dropout: float = 0.0):
+        super().__init__()
+        in_f, out_f = base.in_features, base.out_features
+        self.base    = base                    # frozen — do not register as parameter
+        self.rank    = rank
+        self.scale   = alpha / rank
+        self.lora_A  = nn.Parameter(torch.empty(rank, in_f))
+        self.lora_B  = nn.Parameter(torch.zeros(out_f, rank))
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        # lora_B zeros → delta is 0 at init, preserving base model behavior
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        base_out = self.base(x)
+        lora_out = self.dropout(x) @ self.lora_A.T @ self.lora_B.T
+        return base_out + self.scale * lora_out.to(base_out.dtype)
+
+
+def add_recovery_lora(model: nn.Module, cfg: RecoveryLoRAConfig) -> nn.Module:
+    """
+    Walk every nn.Linear in model whose name matches cfg.target_modules,
+    replace it with a LoRALinear wrapper, and freeze the base weights.
+
+    Returns the modified model (in-place mutation + return for convenience).
+    """
+    for module_name, module in list(model.named_modules()):
+        parent_name, _, child_name = module_name.rpartition(".")
+        if not isinstance(module, nn.Linear):
+            continue
+        if not any(t in child_name for t in cfg.target_modules):
+            continue
+
+        # Freeze base weights
+        module.weight.requires_grad_(False)
+        if module.bias is not None:
+            module.bias.requires_grad_(False)
+
+        # Replace with LoRALinear wrapper
+        lora_layer = LoRALinear(module, cfg.rank, cfg.alpha, cfg.dropout)
+        parent     = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, lora_layer)
+
+    return model
+
+
+def load_base_int4(model: nn.Module, checkpoint_path: str, cfg: RecoveryLoRAConfig) -> nn.Module:
+    """
+    Load a checkpoint into model in int4 (if bitsandbytes is available) or
+    float32 (fallback).  Returns the model with base weights frozen.
+
+    When use_int4=False or bitsandbytes is absent, weights are loaded in
+    float32 and all base parameters are frozen — recovery LoRA still works.
+    """
+    state = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    # Unwrap trainer state dicts that wrap the model under a key
+    for key in ("model", "model_state_dict"):
+        if key in state:
+            state = state[key]
+            break
+    model.load_state_dict(state, strict=False)
+
+    if cfg.use_int4:
+        try:
+            import bitsandbytes as bnb  # type: ignore
+            # Replace nn.Linear with bitsandbytes Int8 / Int4 Linear8bitLt layers
+            # bitsandbytes.functional.quantize_4bit handles in-place replacement
+            # when called through replace_linear_with_target (bnb utility).
+            # We do a manual pass here to stay dependency-light.
+            for name, module in model.named_modules():
+                if isinstance(module, nn.Linear) and module.weight.requires_grad:
+                    module.weight.data = bnb.functional.quantize_4bit(
+                        module.weight.data.cuda().half()
+                    )[0].cpu()
+                    module.weight.requires_grad_(False)
+        except (ImportError, AttributeError):
+            # bitsandbytes absent or version mismatch — continue in float32
+            for p in model.parameters():
+                p.requires_grad_(False)
+    else:
+        for p in model.parameters():
+            p.requires_grad_(False)
+
+    return model
+
+
+class ChimeraTrainer:
+    """
+    Trains SFT student and int4-recovery LoRA in parallel from the same
+    teacher-trace DataLoader.  Both outputs share one run_id.
+
+    The teacher is queried once per batch; both loss computations reuse
+    the resulting teacher logits — no duplicated teacher inference.
+
+    Usage:
+        cfg = ChimeraConfig(run_id="mansa_sovereign_v2")
+        trainer = ChimeraTrainer(
+            student=anthos_model,
+            recovery_base=anthos_int4,   # base model, already loaded + frozen
+            teacher=deepseek_v4,
+            cfg=cfg,
+        )
+        for batch in loader:
+            sft_loss, lora_loss, info = trainer.step(batch, n_loops=8)
+            # losses are already backward()'d; just step the optimizers
+            trainer.step_optimizers()
+
+    Saving checkpoints:
+        trainer.save(step)
+        # → checkpoints/<run_id>/sft/step_005000.pt
+        # → checkpoints/<run_id>/lora/step_005000_lora.pt
+    """
+
+    def __init__(
+        self,
+        student,
+        recovery_base: nn.Module,
+        teacher,
+        cfg:            ChimeraConfig,
+        sft_optimizer:  Optional[torch.optim.Optimizer]  = None,
+        lora_optimizer: Optional[torch.optim.Optimizer]  = None,
+        device:         str                              = "cpu",
+    ):
+        self.student        = student
+        self.teacher        = teacher
+        self.cfg            = cfg
+        self.device         = device
+        self.loss_fn        = DistillationLoss(cfg.distill)
+
+        # Inject LoRA into recovery base; only LoRA weights require grad
+        self.recovery_model = add_recovery_lora(recovery_base, cfg.recovery)
+
+        # Default optimizers if not provided: AdamW on each set of trainable params
+        self.sft_optimizer  = sft_optimizer or torch.optim.AdamW(
+            [p for p in student.parameters() if p.requires_grad], lr=1e-4
+        )
+        self.lora_params = [p for p in self.recovery_model.parameters() if p.requires_grad]
+        self.lora_optimizer = lora_optimizer or torch.optim.AdamW(self.lora_params, lr=2e-4)
+
+        self._last_sft_info  = {}
+        self._last_lora_info = {}
+
+    @torch.no_grad()
+    def _teacher_logits(self, input_ids: torch.Tensor) -> torch.Tensor:
+        self.teacher.eval()
+        out = self.teacher(input_ids.to(self.device))
+        if hasattr(out, "logits"):
+            return out.logits
+        return out
+
+    def step(
+        self,
+        input_ids: torch.Tensor,
+        n_loops:   int = 8,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict]:
+        """
+        One Chimera step.
+
+        1. Run teacher once → teacher_logits (no grad, shared by both pipelines)
+        2. SFT student forward + backward
+        3. Recovery LoRA forward + backward
+        4. Return (sft_loss, lora_loss, combined_info)
+           — callers call step_optimizers() after this to update weights
+        """
+        input_ids = input_ids.to(self.device)
+        labels    = input_ids[:, 1:]
+
+        # ── 1. Teacher (single inference) ────────────────────────────────
+        teacher_logits = self._teacher_logits(input_ids)[:, :-1, :]  # align positions
+
+        # ── 2. SFT student ────────────────────────────────────────────────
+        self.student.train()
+        self.sft_optimizer.zero_grad()
+
+        sft_logits, sft_aux = self.student(input_ids[:, :-1], n_loops=n_loops, return_aux=True)
+        sft_loss, sft_info  = self.loss_fn(sft_logits, teacher_logits, labels)
+        sft_total           = sft_loss + sft_aux
+        sft_total.backward()
+
+        # ── 3. Recovery LoRA ──────────────────────────────────────────────
+        self.recovery_model.train()
+        self.lora_optimizer.zero_grad()
+
+        lora_out = self.recovery_model(input_ids[:, :-1])
+        # recovery_model may be an Anthos or a HF CausalLM — unpack accordingly
+        if isinstance(lora_out, tuple):
+            lora_logits = lora_out[0]
+        elif hasattr(lora_out, "logits"):
+            lora_logits = lora_out.logits
+        else:
+            lora_logits = lora_out
+
+        lora_loss, lora_info = self.loss_fn(lora_logits, teacher_logits, labels)
+        (lora_loss * self.cfg.recovery.loss_coef).backward()
+
+        self._last_sft_info  = {f"sft/{k}":  v for k, v in sft_info.items()}
+        self._last_lora_info = {f"lora/{k}": v for k, v in lora_info.items()}
+
+        return sft_total, lora_loss, {**self._last_sft_info, **self._last_lora_info}
+
+    def step_optimizers(
+        self,
+        grad_clip: float = 1.0,
+    ) -> None:
+        """Clip gradients and step both optimizers. Call after step()."""
+        nn.utils.clip_grad_norm_(self.student.parameters(),        grad_clip)
+        nn.utils.clip_grad_norm_(self.lora_params,                 grad_clip)
+        self.sft_optimizer.step()
+        self.lora_optimizer.step()
+
+    def save(self, step: int) -> tuple[str, str]:
+        """
+        Save SFT student and LoRA-only delta to separate subdirs under run_id.
+
+        Returns (sft_path, lora_path).
+        """
+        import json
+        from pathlib import Path
+
+        run_dir  = Path(self.cfg.checkpoint_dir) / self.cfg.run_id
+        sft_dir  = run_dir / "sft"
+        lora_dir = run_dir / "lora"
+        sft_dir.mkdir(parents=True, exist_ok=True)
+        lora_dir.mkdir(parents=True, exist_ok=True)
+
+        sft_path  = sft_dir  / f"step_{step:06d}.pt"
+        lora_path = lora_dir / f"step_{step:06d}_lora.pt"
+
+        torch.save(self.student.state_dict(),                sft_path)
+        torch.save(
+            {k: v for k, v in self.recovery_model.state_dict().items()
+             if "lora_A" in k or "lora_B" in k},
+            lora_path,
+        )
+
+        meta = {
+            "run_id":     self.cfg.run_id,
+            "step":       step,
+            "sft_path":   str(sft_path),
+            "lora_path":  str(lora_path),
+            "lora_rank":  self.cfg.recovery.rank,
+            "lora_alpha": self.cfg.recovery.alpha,
+        }
+        (run_dir / f"step_{step:06d}_meta.json").write_text(
+            json.dumps(meta, indent=2)
+        )
+
+        return str(sft_path), str(lora_path)
