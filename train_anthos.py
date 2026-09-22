@@ -62,8 +62,13 @@ from anthos.data                import get_dataloader, get_chat_dataloader
 IDENTITY_ROWS   = list(IDENTITY_TOKEN_IDS.values())  # [32000..32007]
 IDENTITY_FREEZE_STEP = 5000  # optimizer steps after which identity rows are frozen
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-IS_GPU = DEVICE == "cuda"
+if torch.cuda.is_available():
+    DEVICE = "cuda"
+elif torch.backends.mps.is_available():
+    DEVICE = "mps"
+else:
+    DEVICE = "cpu"
+IS_GPU = DEVICE in ("cuda", "mps")
 DTYPE  = torch.bfloat16 if IS_GPU else torch.float32
 
 print(f"Device: {DEVICE} | dtype: {DTYPE}")
@@ -182,10 +187,10 @@ def train_loop(
         label_smoothing = 0.05,
     )
     autocast_ctx = (
-        torch.amp.autocast(device_type="cuda", dtype=DTYPE)
-        if IS_GPU else nullcontext()
+        torch.amp.autocast(device_type=DEVICE, dtype=DTYPE)
+        if DEVICE == "cuda" else nullcontext()
     )
-    scaler = torch.cuda.amp.GradScaler() if IS_GPU else None
+    scaler = torch.cuda.amp.GradScaler() if DEVICE == "cuda" else None
 
     data_iter  = iter(loader)
     step       = start_step
@@ -331,7 +336,7 @@ def phase_foundation(resume: str | None = None):
     print(f"  Parameters: {total:,}")
 
     optimizer  = AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.95),
-                       weight_decay=0.1, fused=IS_GPU)
+                       weight_decay=0.1, fused=(DEVICE == "cuda"))
     start_step = 0
     if resume:
         start_step = load(model, optimizer, resume)
@@ -341,7 +346,7 @@ def phase_foundation(resume: str | None = None):
         split        = "train",
         seq_len      = 2048,
         batch_size   = 4,
-        num_workers  = 4 if IS_GPU else 0,
+        num_workers  = 4 if DEVICE == "cuda" else 0,
         subset       = "sample-10BT",
     )
 
@@ -430,7 +435,7 @@ def phase_identity_hardening(
     loader = get_chat_dataloader(
         seq_len        = 512,
         batch_size     = 4,
-        num_workers    = 4 if IS_GPU else 0,
+        num_workers    = 4 if DEVICE == "cuda" else 0,
         tokenizer_path = tok_path,
         dataset_name   = data_path,
     )
@@ -524,7 +529,7 @@ def phase_instruction(resume: str | None = None):
     loader = get_chat_dataloader(
         seq_len        = 1024,
         batch_size     = 4,
-        num_workers    = 4 if IS_GPU else 0,
+        num_workers    = 4 if DEVICE == "cuda" else 0,
         tokenizer_path = tok_path,
         dataset_name   = data_path,
     )
@@ -584,7 +589,7 @@ def phase_grow_3b(resume: str | None = None):
         split        = "train",
         seq_len      = 2048,
         batch_size   = 2,
-        num_workers  = 4 if IS_GPU else 0,
+        num_workers  = 4 if DEVICE == "cuda" else 0,
         subset       = "sample-10BT",
     )
 
