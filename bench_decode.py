@@ -53,9 +53,10 @@ def build_config(tier: str) -> AnthosConfig:
         )
     if tier == "proof":
         return AnthosConfig(
-            vocab_size=50262, dim=512, n_heads=8, n_kv_heads=4,
-            max_seq_len=1024, max_loop_iters=8, n_thought_tokens=16,
-            attn_type="gqa", n_experts=16, expert_dim=512,
+            vocab_size=50257, dim=512, n_heads=8, n_kv_heads=4,
+            max_seq_len=512, max_loop_iters=8, n_thought_tokens=16,
+            attn_type="gqa", n_experts=16, n_shared_experts=2,
+            n_experts_per_tok=4, expert_dim=256, lora_rank=8,
             prelude_layers=2, coda_layers=2,
         )
     raise ValueError(f"unknown tier: {tier}")
