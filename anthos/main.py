@@ -152,23 +152,29 @@ def apply_rope(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
 
 
 def _anthos_rope_freqs(
-    freqs_cis: torch.Tensor,
-    n_thought:  int,
-    seq_len:    int,
+    freqs_cis:       torch.Tensor,
+    thought_freqs_0: torch.Tensor,
+    n_thought:       int,
+    seq_len:         int,
 ) -> torch.Tensor:
     """
     Build combined RoPE frequencies for [thought | sequence].
 
-    Thought tokens all receive position-0 frequencies (a fixed neutral
-    reference that doesn't encode sequence order — thoughts are not
-    sequential, they're working-memory slots).
+    Thought tokens all receive true position-0 frequencies via `thought_freqs_0`
+    (a fixed neutral reference that doesn't encode sequence order — thoughts are
+    not sequential, they're working-memory slots).
 
-    Sequence tokens receive their natural positions 0…seq_len-1.
+    `thought_freqs_0` must be the absolute position-0 frequency, NOT derived
+    from the current decode window's `freqs_cis`, which is pre-sliced to
+    [start_pos:] and would give the wrong position during decode (freqs_cis[0]
+    drifts with start_pos instead of staying pinned to true position 0).
+
+    Sequence tokens receive their natural positions from `freqs_cis`.
 
     Returns: (n_thought + seq_len, head_dim//2)
     """
-    thought_freqs = freqs_cis[0:1].expand(n_thought, -1)   # all same (pos 0)
-    seq_freqs     = freqs_cis[:seq_len]                     # natural positions
+    thought_freqs = thought_freqs_0.expand(n_thought, -1)   # (n_thought, head_dim//2) — true pos-0
+    seq_freqs     = freqs_cis[:seq_len]                      # natural positions
     return torch.cat([thought_freqs, seq_freqs], dim=0)
 
 
@@ -214,6 +220,7 @@ class GQAttention(nn.Module):
         self.n_kv_heads = cfg.n_kv_heads
         self.head_dim   = cfg.dim // cfg.n_heads
         self.groups     = cfg.n_heads // cfg.n_kv_heads
+        self.max_seq_len = cfg.max_seq_len
 
         self.wq = nn.Linear(cfg.dim, cfg.n_heads    * self.head_dim, bias=False)
         self.wk = nn.Linear(cfg.dim, cfg.n_kv_heads * self.head_dim, bias=False)
@@ -228,6 +235,7 @@ class GQAttention(nn.Module):
         kv_cache:         Optional[dict]         = None,
         cache_key:        str                    = "default",
         n_thought_prefix: int                    = 0,
+        is_causal:        bool                   = False,
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
@@ -242,25 +250,47 @@ class GQAttention(nn.Module):
             # Bifurcated caching: only sequence-token KVs accumulate in the cache.
             # Thought tokens are regenerated fresh each decoding step, so including
             # them in the cache would grow the context by n_thought per step (OOM bug).
-            k_seq = k[:, n_thought_prefix:, :]
-            v_seq = v[:, n_thought_prefix:, :]
-            if cache_key in kv_cache:
-                k_seq = torch.cat([kv_cache[cache_key]["k"], k_seq], dim=1)
-                v_seq = torch.cat([kv_cache[cache_key]["v"], v_seq], dim=1)
-            kv_cache[cache_key] = {"k": k_seq.detach(), "v": v_seq.detach()}
-            # Rebuild full KV: fresh thought KVs (current step) + accumulated sequence KVs
-            if n_thought_prefix > 0:
-                k = torch.cat([k[:, :n_thought_prefix, :], k_seq], dim=1)
-                v = torch.cat([v[:, :n_thought_prefix, :], v_seq], dim=1)
+            #
+            # Combined buffer layout: [thought_slots | sequence_slots]
+            # Thought slots (first n_thought_prefix positions) are overwritten in-place
+            # each decode step with fresh values — no torch.cat needed.
+            k_new = k[:, n_thought_prefix:, :]
+            v_new = v[:, n_thought_prefix:, :]
+            T_new = k_new.shape[1]
+            if cache_key not in kv_cache:
+                total = n_thought_prefix + self.max_seq_len
+                buf_k = k_new.new_zeros(B, total, self.n_kv_heads, self.head_dim)
+                buf_v = v_new.new_zeros(B, total, self.n_kv_heads, self.head_dim)
+                if n_thought_prefix > 0:
+                    buf_k[:, :n_thought_prefix].copy_(k[:, :n_thought_prefix])
+                    buf_v[:, :n_thought_prefix].copy_(v[:, :n_thought_prefix])
+                buf_k[:, n_thought_prefix:n_thought_prefix + T_new].copy_(k_new)
+                buf_v[:, n_thought_prefix:n_thought_prefix + T_new].copy_(v_new)
+                kv_cache[cache_key] = {"k": buf_k, "v": buf_v, "seq_pos": T_new, "n_thought": n_thought_prefix}
             else:
-                k, v = k_seq, v_seq
+                n_th = kv_cache[cache_key]["n_thought"]
+                pos  = kv_cache[cache_key]["seq_pos"]
+                end  = pos + T_new
+                if n_th > 0:
+                    kv_cache[cache_key]["k"][:, :n_th].copy_(k[:, :n_th])
+                    kv_cache[cache_key]["v"][:, :n_th].copy_(v[:, :n_th])
+                kv_cache[cache_key]["k"][:, n_th + pos:n_th + end].copy_(k_new)
+                kv_cache[cache_key]["v"][:, n_th + pos:n_th + end].copy_(v_new)
+                kv_cache[cache_key]["seq_pos"] = end
+            n_th    = kv_cache[cache_key]["n_thought"]
+            seq_pos = kv_cache[cache_key]["seq_pos"]
+            k = kv_cache[cache_key]["k"][:, :n_th + seq_pos]
+            v = kv_cache[cache_key]["v"][:, :n_th + seq_pos]
 
         S = k.shape[1]
         k = k.unsqueeze(3).expand(B, S, self.n_kv_heads, self.groups, self.head_dim).reshape(B, S, self.n_heads, self.head_dim)
         v = v.unsqueeze(3).expand(B, S, self.n_kv_heads, self.groups, self.head_dim).reshape(B, S, self.n_heads, self.head_dim)
 
         q = q.transpose(1, 2);  k = k.transpose(1, 2);  v = v.transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        if is_causal and mask is None:
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.wo(out.transpose(1, 2).contiguous().view(B, T, -1))
 
 
@@ -287,6 +317,7 @@ class MLAttention(nn.Module):
         self.kv_norm = RMSNorm(cfg.kv_lora_rank)
         self.kv_up   = nn.Linear(cfg.kv_lora_rank, cfg.n_heads * (cfg.qk_nope_head_dim + cfg.v_head_dim), bias=False)
         self.wo      = nn.Linear(cfg.n_heads * cfg.v_head_dim, cfg.dim, bias=False)
+        self.max_seq_len = cfg.max_seq_len
 
     def forward(
         self,
@@ -296,6 +327,7 @@ class MLAttention(nn.Module):
         kv_cache:         Optional[dict]         = None,
         cache_key:        str                    = "default",
         n_thought_prefix: int                    = 0,
+        is_causal:        bool                   = False,
     ) -> torch.Tensor:
         B, T, _ = x.shape
 
@@ -315,18 +347,37 @@ class MLAttention(nn.Module):
             # Bifurcated caching: only sequence-token KV projections accumulate.
             # Thought tokens are regenerated fresh each step; caching them would
             # grow the KV sequence by n_thought per decoding step (OOM bug).
-            c_kv_seq   = c_kv[:, n_thought_prefix:, :]
-            k_rope_seq = k_rope[:, n_thought_prefix:, :]
-            if cache_key in kv_cache:
-                c_kv_seq   = torch.cat([kv_cache[cache_key]["c_kv"],   c_kv_seq],   dim=1)
-                k_rope_seq = torch.cat([kv_cache[cache_key]["k_rope"], k_rope_seq], dim=1)
-            kv_cache[cache_key] = {"c_kv": c_kv_seq.detach(), "k_rope": k_rope_seq.detach()}
-            # Rebuild: fresh thought KV projections + accumulated sequence KV projections
-            if n_thought_prefix > 0:
-                c_kv   = torch.cat([c_kv[:, :n_thought_prefix, :],   c_kv_seq],   dim=1)
-                k_rope = torch.cat([k_rope[:, :n_thought_prefix, :], k_rope_seq], dim=1)
+            #
+            # Combined buffer layout: [thought_slots | sequence_slots]
+            # Thought slots (first n_thought_prefix positions) are overwritten in-place
+            # each decode step with fresh values — no torch.cat needed.
+            c_kv_new   = c_kv[:, n_thought_prefix:, :]
+            k_rope_new = k_rope[:, n_thought_prefix:, :]
+            T_new      = c_kv_new.shape[1]
+            if cache_key not in kv_cache:
+                total      = n_thought_prefix + self.max_seq_len
+                buf_c_kv   = c_kv_new.new_zeros(B, total, self.kv_lora_rank)
+                buf_k_rope = k_rope_new.new_zeros(B, total, self.n_heads, self.qk_rope_dim)
+                if n_thought_prefix > 0:
+                    buf_c_kv[:, :n_thought_prefix].copy_(c_kv[:, :n_thought_prefix])
+                    buf_k_rope[:, :n_thought_prefix].copy_(k_rope[:, :n_thought_prefix])
+                buf_c_kv[:, n_thought_prefix:n_thought_prefix + T_new].copy_(c_kv_new)
+                buf_k_rope[:, n_thought_prefix:n_thought_prefix + T_new].copy_(k_rope_new)
+                kv_cache[cache_key] = {"c_kv": buf_c_kv, "k_rope": buf_k_rope, "seq_pos": T_new, "n_thought": n_thought_prefix}
             else:
-                c_kv, k_rope = c_kv_seq, k_rope_seq
+                n_th = kv_cache[cache_key]["n_thought"]
+                pos  = kv_cache[cache_key]["seq_pos"]
+                end  = pos + T_new
+                if n_th > 0:
+                    kv_cache[cache_key]["c_kv"][:, :n_th].copy_(c_kv[:, :n_th])
+                    kv_cache[cache_key]["k_rope"][:, :n_th].copy_(k_rope[:, :n_th])
+                kv_cache[cache_key]["c_kv"][:, n_th + pos:n_th + end].copy_(c_kv_new)
+                kv_cache[cache_key]["k_rope"][:, n_th + pos:n_th + end].copy_(k_rope_new)
+                kv_cache[cache_key]["seq_pos"] = end
+            n_th    = kv_cache[cache_key]["n_thought"]
+            seq_pos = kv_cache[cache_key]["seq_pos"]
+            c_kv   = kv_cache[cache_key]["c_kv"][:, :n_th + seq_pos]
+            k_rope = kv_cache[cache_key]["k_rope"][:, :n_th + seq_pos]
 
         S  = c_kv.shape[1]
         kv = self.kv_up(self.kv_norm(c_kv)).view(B, S, self.n_heads, self.qk_nope_dim + self.v_dim)
@@ -334,7 +385,10 @@ class MLAttention(nn.Module):
         v  = kv[..., self.qk_nope_dim:]
 
         q = q.transpose(1, 2);  k = k.transpose(1, 2);  v = v.transpose(1, 2)
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        if is_causal and mask is None:
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.wo(out.transpose(1, 2).contiguous().view(B, T, -1))
 
 
@@ -402,8 +456,9 @@ class MoEFFN(nn.Module):
         ])
 
         output_sorted = torch.zeros_like(tokens_sorted)
+        offsets_cpu = offsets.cpu().tolist()  # one sync instead of 2*n_experts
         for eid in range(self.n_experts):
-            s, e = offsets[eid].item(), offsets[eid + 1].item()
+            s, e = offsets_cpu[eid], offsets_cpu[eid + 1]
             if s == e:
                 continue
             output_sorted[s:e] = self.routed_experts[eid](tokens_sorted[s:e])
@@ -480,9 +535,10 @@ class TransformerBlock(nn.Module):
         kv_cache:         Optional[dict]         = None,
         cache_key:        str                    = "default",
         n_thought_prefix: int                    = 0,
+        is_causal:        bool                   = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (output, aux_loss). aux_loss is 0 for dense blocks."""
-        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key, n_thought_prefix)
+        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key, n_thought_prefix, is_causal)
         if self.use_moe:
             ffn_out, aux = self.ffn(self.ffn_norm(x))
         else:
@@ -685,13 +741,14 @@ class AnthosRecurrentBlock(nn.Module):
 
     def forward(
         self,
-        h:            torch.Tensor,
-        thoughts:     torch.Tensor,
-        e:            torch.Tensor,
-        freqs_cis:    torch.Tensor,
-        n_loops:      Optional[int]              = None,
-        kv_cache:     Optional[dict]             = None,
-        memory_state: Optional[MemoryBankState]  = None,
+        h:               torch.Tensor,
+        thoughts:        torch.Tensor,
+        e:               torch.Tensor,
+        freqs_cis:       torch.Tensor,
+        thought_freqs_0: torch.Tensor,
+        n_loops:         Optional[int]              = None,
+        kv_cache:        Optional[dict]             = None,
+        memory_state:    Optional[MemoryBankState]  = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux, halt_probs).
 
@@ -718,7 +775,7 @@ class AnthosRecurrentBlock(nn.Module):
             loop_emb       = self.loop_embeds[min(t, self.loop_embeds.shape[0] - 1)]
             h_combined     = self.h_pre_norm(h + loop_emb) + e_normed
             full_seq       = torch.cat([thoughts, h_combined], dim=1)
-            combined_freqs = _anthos_rope_freqs(freqs_cis, self.n_thought, T)
+            combined_freqs = _anthos_rope_freqs(freqs_cis, thought_freqs_0, self.n_thought, T)
 
             cache_key         = f"anthos_loop_{t}"
             full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, self.n_thought)
@@ -894,21 +951,22 @@ class Anthos(nn.Module):
 
         x = self.embed(input_ids)                          # (B, T, dim)
 
-        use_mla   = (self.cfg.attn_type == "mla")
-        freqs_cis = self._get_rope_freqs(T + start_pos, use_mla=use_mla)[start_pos:]
-
-        # Standard causal mask for prelude/coda (no thought tokens)
-        std_mask = self._causal_mask(T, device) if T > 1 else None
+        use_mla         = (self.cfg.attn_type == "mla")
+        freqs_cis       = self._get_rope_freqs(T + start_pos, use_mla=use_mla)[start_pos:]
+        # True position-0 freq for thought tokens — must NOT be derived from the
+        # already-offset freqs_cis window, or thought RoPE drifts during decode.
+        thought_freqs_0 = self._get_rope_freqs(1, use_mla=use_mla)  # shape (1, head_dim//2)
 
         # ── Prelude ───────────────────────────────────────────────────────
+        # is_causal=True lets SDPA use Flash Attention; no explicit mask tensor needed.
         for i, layer in enumerate(self.prelude):
-            x, _ = layer(x, freqs_cis, std_mask, kv_cache, cache_key=f"prelude_{i}")
+            x, _ = layer(x, freqs_cis, mask=None, kv_cache=kv_cache, cache_key=f"prelude_{i}", is_causal=True)
 
         # ── Anthos Recurrent Block ────────────────────────────────────────
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
         x, moe_aux, act_aux, memory_state, loops_used, prerouter_aux, halt_probs = self.recurrent(
-            x, thoughts, e, freqs_cis, n_loops, kv_cache, memory_state
+            x, thoughts, e, freqs_cis, thought_freqs_0, n_loops, kv_cache, memory_state
         )
         self._last_memory_state  = memory_state    # expose for stateful inference wrappers
         self._last_loops_used    = loops_used      # expose for EAFT loss weighting
@@ -917,7 +975,7 @@ class Anthos(nn.Module):
 
         # ── Coda ──────────────────────────────────────────────────────────
         for i, layer in enumerate(self.coda):
-            x, _ = layer(x, freqs_cis, std_mask, kv_cache, cache_key=f"coda_{i}")
+            x, _ = layer(x, freqs_cis, mask=None, kv_cache=kv_cache, cache_key=f"coda_{i}", is_causal=True)
 
         x_normed = self.norm(x)
         self._last_hidden_states = x_normed   # exposed for AnthosWithIdentityLock
