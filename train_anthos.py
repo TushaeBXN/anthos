@@ -387,8 +387,20 @@ def phase_identity_hardening(resume: str | None = None):
 
     # Identity params and embeddings get 3× learning rate.
     # model.named_parameters() includes both base.* and identity_head.* keys.
+    #
+    # TRADEOFF: weight_decay=0 applies to the ENTIRE embed tensor (all 50k rows),
+    # not just the 8 identity rows. A row-level split is unsafe because Anthos ties
+    # head.weight = embed.weight (main.py:884); splitting that tensor across param
+    # groups would register it twice, doubling gradient accumulation. Accepting
+    # zero decay on the full embedding is the correct tradeoff — the embed matrix
+    # trains well without decay in practice, and the hard post-step restore already
+    # prevents AdamW decay from drifting the 8 frozen identity rows.
     identity_params, normal_params = [], []
+    seen_ids = set()
     for name, p in model.named_parameters():
+        if id(p) in seen_ids:
+            continue  # skip tied parameters already registered (head.weight = embed.weight)
+        seen_ids.add(id(p))
         if "identity" in name or "embed" in name:
             identity_params.append(p)
         else:
@@ -396,8 +408,6 @@ def phase_identity_hardening(resume: str | None = None):
 
     optimizer = AdamW([
         {"params": normal_params,   "lr": 1e-4,  "weight_decay": 0.1},
-        # identity_head params + embed rows: weight_decay=0 so AdamW's
-        # unconditional decay doesn't fight the copy_-restore after freeze.
         {"params": identity_params, "lr": 3e-4,  "weight_decay": 0.0},
     ], betas=(0.9, 0.95))
 
@@ -460,8 +470,13 @@ def phase_instruction(resume: str | None = None):
 
     # Mirror Phase 2's param groups so identity weights retain weight_decay=0
     # and gradient masking in train_loop fires at the same threshold.
+    # seen_ids guard prevents double-registration of tied tensors (head.weight = embed.weight).
     identity_params, normal_params = [], []
+    seen_ids = set()
     for name, p in model.named_parameters():
+        if id(p) in seen_ids:
+            continue
+        seen_ids.add(id(p))
         if "identity" in name or "embed" in name:
             identity_params.append(p)
         else:
