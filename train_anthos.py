@@ -113,6 +113,8 @@ def save(model: nn.Module, optimizer: AdamW, step: int, loss: float,
 
 def load(model: nn.Module, optimizer: AdamW | None, path: str):
     cp = torch.load(path, map_location=DEVICE, weights_only=False)
+    if "signature" in cp:
+        signer.verify(cp)
     state = cp.get("model_state_dict", cp.get("model", cp))
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
@@ -201,17 +203,18 @@ def train_loop(
                 batch     = next(data_iter)
 
             with autocast_ctx:
+                # Route through base model when AnthosWithIdentityLock wrapper is present
+                inner = model.base if hasattr(model, "base") else model
                 if is_sft:
                     input_ids = batch[0].to(DEVICE)[:, :seq_len]
                     labels    = batch[1].to(DEVICE)[:, :seq_len]
-                    logits, aux = model(input_ids, n_loops=16, return_aux=True)
-                    ce   = eaft(logits, labels)
-                    # identity_loss_weight scales extra emphasis on identity-labeled
-                    # tokens when using AnthosWithIdentityLock (id_loss > 0 only then)
+                    logits, aux = inner(input_ids, n_loops=16, return_aux=True)
+                    loops_used = getattr(inner, "_last_loops_used", None)
+                    ce   = eaft(logits, labels, loops_used=loops_used)
                     id_loss = torch.zeros(1, device=logits.device)
                     if hasattr(model, "identity_head"):
                         try:
-                            hidden = model.base.get_hidden_states()
+                            hidden = inner.get_hidden_states()
                             id_logits = model.identity_head(hidden)
                             id_mask = (labels >= 32000) & (labels <= 32007)
                             if id_mask.any():
@@ -224,8 +227,9 @@ def train_loop(
                 else:
                     input_ids = batch.to(DEVICE)
                     x, y      = input_ids[:, :-1], input_ids[:, 1:]
-                    logits, aux = model(x, n_loops=16, return_aux=True)
-                    ce   = eaft(logits, y)
+                    logits, aux = inner(x, n_loops=16, return_aux=True)
+                    loops_used = getattr(inner, "_last_loops_used", None)
+                    ce   = eaft(logits, y, loops_used=loops_used)
                     loss = (ce + aux) / grad_accum
 
             if scaler:
@@ -331,11 +335,13 @@ def phase_identity_hardening(resume: str | None = None):
         sys.exit(1)
 
     cfg   = get_1b_config()
-    model = Anthos(cfg).to(DEVICE)
+    _base = Anthos(cfg).to(DEVICE)
+    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=5000)
     total = sum(p.numel() for p in model.parameters())
-    print(f"  Parameters: {total:,}")
+    print(f"  Parameters: {total:,}  (base + identity_head)")
 
-    # Identity params get 3× learning rate
+    # Identity params and embeddings get 3× learning rate.
+    # model.named_parameters() includes both base.* and identity_head.* keys.
     identity_params, normal_params = [], []
     for name, p in model.named_parameters():
         if "identity" in name or "embed" in name:
@@ -407,11 +413,24 @@ def phase_instruction(resume: str | None = None):
     optimizer = AdamW(model.parameters(), lr=2e-5, betas=(0.9, 0.95), weight_decay=0.1)
 
     start_step = 0
+    _id_ckpt   = Path("checkpoints/anthos-1b/identity_hardening_final.pt")
     if resume:
         start_step = load(model, optimizer, resume)
-    elif Path("checkpoints/anthos-1b/identity_hardening_final.pt").exists():
-        load(model, None, "checkpoints/anthos-1b/identity_hardening_final.pt")
+    elif _id_ckpt.exists():
+        _meta_cp  = torch.load(str(_id_ckpt), map_location="cpu", weights_only=False)
+        _phase    = _meta_cp.get("metadata", {}).get("phase", "")
+        if _phase not in ("identity_hardening", "instruction", "grow_3b"):
+            raise RuntimeError(
+                f"Phase 3 requires a checkpoint from phase 'identity_hardening' or later, "
+                f"but {_id_ckpt.name} has phase='{_phase}'. Run Phase 2 first."
+            )
+        load(model, None, str(_id_ckpt))
         print("  ✓ Loaded identity-hardened weights")
+    else:
+        raise RuntimeError(
+            f"Phase 3 (instruction) requires {_id_ckpt}. "
+            "Run Phase 2 (identity_hardening) first, or pass --resume to load a specific checkpoint."
+        )
 
     tok_path = "data/anthos_tokenizer" if Path("data/anthos_tokenizer").exists() else "gpt2"
     loader = get_chat_dataloader(
