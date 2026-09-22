@@ -265,6 +265,19 @@ def train_loop(
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
+        # ── Hard post-step restore ───────────────────────────────────────────
+        # Grad masking causes momentum to decay over time (the slow fix).
+        # This copy_ is the guaranteed immediate fix: even while momentum
+        # is still non-zero and would drift the embedding, we restore
+        # identity rows to the frozen snapshot after every optimizer.step().
+        # Without this, checkpoints saved between now and full momentum
+        # decay would contain drifted embedding values.
+        if step >= IDENTITY_FREEZE_STEP and hasattr(model, "identity_embedding_snapshot"):
+            _embed = getattr(model.base, "embed", None)
+            if _embed is not None:
+                with torch.no_grad():
+                    _embed.weight.data[IDENTITY_ROWS] = model.identity_embedding_snapshot
+
         step += 1
 
         # ── Momentum decay logging (every 500 steps after freeze) ───────────

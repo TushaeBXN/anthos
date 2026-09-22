@@ -4,10 +4,17 @@ tests/test_identity_freeze.py — Identity lock verification tests 1, 3, 4.
 Run after collecting real Phase 2 checkpoints:
 
     python3 tests/test_identity_freeze.py \\
-        --before checkpoints/anthos-1b/identity_hardening_step_004999.pt \\
-        --after  checkpoints/anthos-1b/identity_hardening_step_005001.pt
+        --before checkpoints/anthos-1b/identity_hardening_step_005001.pt \\
+        --after  checkpoints/anthos-1b/identity_hardening_step_005100.pt
 
-Test 1 — Value stability:  diff identity embedding rows between the two saves.
+IMPORTANT: pass two POST-freeze checkpoints for Test 1 — both must be from
+after the freeze step (≥ step 5000). Comparing pre-freeze to post-freeze will
+always show non-zero drift: at the freeze boundary, the hard restore snaps
+trained values back to the initialization snapshot, so the difference is
+intentional, not a bug. What matters is that values are STABLE between any
+two consecutive checkpoints after the freeze is active.
+
+Test 1 — Value stability:  diff identity embedding rows between two post-freeze saves.
 Test 3 — Weight decay check: inspect param group config on a fresh model (no checkpoint needed).
 Test 4 — Phase 3 continuity: load Phase 2 checkpoint into AnthosWithIdentityLock,
           confirm identity_head.* keys are NOT in missing (i.e., they're loaded, not reinit'd).
@@ -87,9 +94,10 @@ def _load_state(path: str) -> dict:
 
 def test_value_stability(before_path: str, after_path: str) -> bool:
     print("\n" + "─"*60)
-    print("TEST 1 — Value stability (identity embedding rows)")
-    print(f"  before: {before_path}")
-    print(f"  after:  {after_path}")
+    print("TEST 1 — Value stability (identity embedding rows, both post-freeze)")
+    print(f"  checkpoint A: {before_path}")
+    print(f"  checkpoint B: {after_path}")
+    print("  NOTE: both checkpoints must be from after the freeze step (>= step 5000).")
 
     sd_before = _load_state(before_path)
     sd_after  = _load_state(after_path)
@@ -225,9 +233,9 @@ def test_phase3_continuity(phase2_ckpt: str) -> bool:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--before", default=None,
-                    help="Checkpoint from just before the freeze step (step 4999)")
+                    help="First post-freeze checkpoint (e.g. step 5001)")
     ap.add_argument("--after",  default=None,
-                    help="Checkpoint from just after the freeze step (step 5001)")
+                    help="Second post-freeze checkpoint (e.g. step 5100); both must be >= freeze_step")
     ap.add_argument("--phase2", default=None,
                     help="Phase 2 final checkpoint (for Test 4). "
                          "Defaults to --after if not set.")
@@ -243,7 +251,8 @@ def main():
     if not args.skip_stability:
         if not args.before or not args.after:
             print("\nTest 1 skipped — pass --before and --after to run it.")
-            print("  (save checkpoints at step 4999 and 5001 during Phase 2 training)")
+            print("  (save two checkpoints after step 5000 during Phase 2 training;")
+            print("   both must be post-freeze — comparing pre-to-post shows intentional snap-back)")
             results["test1_stability"] = None
         else:
             results["test1_stability"] = test_value_stability(args.before, args.after)
