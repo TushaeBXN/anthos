@@ -46,7 +46,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from anthos.main                import Anthos
 from anthos.configs             import AnthosConfig
-from anthos.identity_hardening  import AnthosWithIdentityLock, CheckpointSigner, IDENTITY_TOKEN_IDS
+from anthos.identity_hardening  import (
+    AnthosWithIdentityLock, CheckpointSigner,
+    IDENTITY_TOKEN_IDS, REQUIRED_IDENTITY_SEQUENCE,
+)
 from anthos.scalable_growth     import ScalableAnthos
 from anthos.eaft                import EAFTLoss
 from anthos.data                import get_dataloader, get_chat_dataloader
@@ -54,6 +57,10 @@ from anthos.data                import get_dataloader, get_chat_dataloader
 # ─────────────────────────────────────────────────────────────────────────────
 # DEVICE
 # ─────────────────────────────────────────────────────────────────────────────
+
+# Identity token row indices in the embedding table (rows 32000-32007)
+IDENTITY_ROWS   = list(IDENTITY_TOKEN_IDS.values())  # [32000..32007]
+IDENTITY_FREEZE_STEP = 5000  # optimizer steps after which identity rows are frozen
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 IS_GPU = DEVICE == "cuda"
@@ -238,6 +245,17 @@ def train_loop(
                 loss.backward()
             loss_accum += ce.item()
 
+        # ── Identity gradient masking ────────────────────────────────────────
+        # After IDENTITY_FREEZE_STEP optimizer steps, zero gradients for
+        # identity embedding rows so Adam's momentum decays toward zero
+        # instead of accumulating. The copy_-restore in
+        # AnthosWithIdentityLock.forward acts as a secondary safety check
+        # that undoes any residual weight-decay drift.
+        if step >= IDENTITY_FREEZE_STEP and hasattr(model, "base"):
+            _embed = getattr(model.base, "embed", None)
+            if _embed is not None and _embed.weight.grad is not None:
+                _embed.weight.grad[IDENTITY_ROWS] = 0.0
+
         if scaler:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -248,6 +266,20 @@ def train_loop(
             optimizer.step()
 
         step += 1
+
+        # ── Momentum decay logging (every 500 steps after freeze) ───────────
+        if (step >= IDENTITY_FREEZE_STEP and step % 500 == 0
+                and hasattr(model, "base")):
+            _embed = getattr(model.base, "embed", None)
+            if _embed is not None:
+                for group in optimizer.param_groups:
+                    for p in group["params"]:
+                        if p is _embed.weight and p in optimizer.state:
+                            _st = optimizer.state[p]
+                            if "exp_avg" in _st:
+                                _mom = _st["exp_avg"][IDENTITY_ROWS].abs().mean().item()
+                                print(f"  [identity freeze] step {step} | "
+                                      f"embedding momentum (rows 32000-32007): {_mom:.6f}")
 
         if step % log_every == 0:
             t1       = time.time()
@@ -350,9 +382,11 @@ def phase_identity_hardening(resume: str | None = None):
             normal_params.append(p)
 
     optimizer = AdamW([
-        {"params": normal_params,   "lr": 1e-4},
-        {"params": identity_params, "lr": 3e-4},
-    ], betas=(0.9, 0.95), weight_decay=0.1)
+        {"params": normal_params,   "lr": 1e-4,  "weight_decay": 0.1},
+        # identity_head params + embed rows: weight_decay=0 so AdamW's
+        # unconditional decay doesn't fight the copy_-restore after freeze.
+        {"params": identity_params, "lr": 3e-4,  "weight_decay": 0.0},
+    ], betas=(0.9, 0.95))
 
     start_step = 0
     if resume:
@@ -407,10 +441,22 @@ def phase_instruction(resume: str | None = None):
         sys.exit(1)
 
     cfg   = get_1b_config()
-    model = Anthos(cfg).to(DEVICE)
-    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}")
+    _base = Anthos(cfg).to(DEVICE)
+    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=IDENTITY_FREEZE_STEP)
+    print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}  (base + identity_head)")
 
-    optimizer = AdamW(model.parameters(), lr=2e-5, betas=(0.9, 0.95), weight_decay=0.1)
+    # Mirror Phase 2's param groups so identity weights retain weight_decay=0
+    # and gradient masking in train_loop fires at the same threshold.
+    identity_params, normal_params = [], []
+    for name, p in model.named_parameters():
+        if "identity" in name or "embed" in name:
+            identity_params.append(p)
+        else:
+            normal_params.append(p)
+    optimizer = AdamW([
+        {"params": normal_params,   "lr": 2e-5,  "weight_decay": 0.1},
+        {"params": identity_params, "lr": 2e-6,  "weight_decay": 0.0},
+    ], betas=(0.9, 0.95))
 
     start_step = 0
     _id_ckpt   = Path("checkpoints/anthos-1b/identity_hardening_final.pt")
@@ -431,6 +477,11 @@ def phase_instruction(resume: str | None = None):
             f"Phase 3 (instruction) requires {_id_ckpt}. "
             "Run Phase 2 (identity_hardening) first, or pass --resume to load a specific checkpoint."
         )
+
+    # Print trainable vs frozen param count so it's visible in logs
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    n_total     = sum(p.numel() for p in model.parameters())
+    print(f"  Trainable: {n_trainable:,} / {n_total:,} params")
 
     tok_path = "data/anthos_tokenizer" if Path("data/anthos_tokenizer").exists() else "gpt2"
     loader = get_chat_dataloader(
