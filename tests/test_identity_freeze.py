@@ -43,6 +43,29 @@ IDENTITY_ROWS = list(IDENTITY_TOKEN_IDS.values())   # [32000..32007]
 DRIFT_THRESHOLD = 1e-6
 
 
+def get_smoke_cfg() -> AnthosConfig:
+    # Must match get_smoke_config() in train_anthos.py exactly.
+    return AnthosConfig(
+        vocab_size        = 32016,
+        dim               = 256,
+        n_heads           = 4,
+        n_kv_heads        = 2,
+        max_seq_len       = 128,
+        max_loop_iters    = 2,
+        prelude_layers    = 1,
+        coda_layers       = 1,
+        n_thought_tokens  = 4,
+        attn_type         = "gqa",
+        n_experts         = 4,
+        n_shared_experts  = 1,
+        n_experts_per_tok = 2,
+        expert_dim        = 128,
+        moe_aux_coef      = 1e-2,
+        act_aux_coef      = 1e-3,
+        lora_rank         = 4,
+    )
+
+
 def get_proof_cfg() -> AnthosConfig:
     return AnthosConfig(
         vocab_size        = 50257,
@@ -138,14 +161,15 @@ def test_value_stability(before_path: str, after_path: str) -> bool:
 # Test 3 — Weight decay configuration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_weight_decay_config() -> bool:
+def test_weight_decay_config(cfg: AnthosConfig | None = None) -> bool:
     print("\n" + "─"*60)
     print("TEST 3 — Weight decay configuration")
     print("  (no checkpoint needed — inspects optimizer param groups)")
 
     from torch.optim import AdamW
 
-    cfg   = get_1b_cfg()
+    if cfg is None:
+        cfg = get_1b_cfg()
     base  = Anthos(cfg)
     model = AnthosWithIdentityLock(base, hidden_dim=cfg.dim)
 
@@ -195,12 +219,13 @@ def test_weight_decay_config() -> bool:
 # Test 4 — Phase 3 checkpoint continuity
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_phase3_continuity(phase2_ckpt: str) -> bool:
+def test_phase3_continuity(phase2_ckpt: str, cfg: AnthosConfig | None = None) -> bool:
     print("\n" + "─"*60)
     print("TEST 4 — Phase 3 checkpoint continuity")
     print(f"  loading: {phase2_ckpt}")
 
-    cfg   = get_1b_cfg()
+    if cfg is None:
+        cfg = get_1b_cfg()
     base  = Anthos(cfg)
     model = AnthosWithIdentityLock(base, hidden_dim=cfg.dim)
 
@@ -241,17 +266,23 @@ def main():
                          "Defaults to --after if not set.")
     ap.add_argument("--skip-stability", action="store_true",
                     help="Skip Test 1 (use when checkpoints aren't available yet)")
+    ap.add_argument("--tier", default="1b", choices=["1b", "smoke"],
+                    help="Model tier: '1b' (default) or 'smoke' — must match the "
+                         "tier used when the checkpoints were produced.")
     args = ap.parse_args()
+
+    cfg = get_smoke_cfg() if args.tier == "smoke" else get_1b_cfg()
+    print(f"\nTier: {args.tier}  |  dim={cfg.dim}  vocab={cfg.vocab_size}")
 
     results = {}
 
     # Test 3 never needs checkpoints — always run it
-    results["test3_weight_decay"] = test_weight_decay_config()
+    results["test3_weight_decay"] = test_weight_decay_config(cfg)
 
     if not args.skip_stability:
         if not args.before or not args.after:
             print("\nTest 1 skipped — pass --before and --after to run it.")
-            print("  (save two checkpoints after step 5000 during Phase 2 training;")
+            print("  (save two checkpoints after the freeze step during Phase 2 training;")
             print("   both must be post-freeze — comparing pre-to-post shows intentional snap-back)")
             results["test1_stability"] = None
         else:
@@ -259,7 +290,7 @@ def main():
 
     phase2_ckpt = args.phase2 or args.after
     if phase2_ckpt and Path(phase2_ckpt).exists():
-        results["test4_continuity"] = test_phase3_continuity(phase2_ckpt)
+        results["test4_continuity"] = test_phase3_continuity(phase2_ckpt, cfg)
     else:
         print("\nTest 4 skipped — pass --phase2 (or --after) pointing at a Phase 2 checkpoint.")
         results["test4_continuity"] = None

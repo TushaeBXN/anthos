@@ -59,8 +59,8 @@ from anthos.data                import get_dataloader, get_chat_dataloader
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Identity token row indices in the embedding table (rows 32000-32007)
-IDENTITY_ROWS   = list(IDENTITY_TOKEN_IDS.values())  # [32000..32007]
-IDENTITY_FREEZE_STEP = 5000  # optimizer steps after which identity rows are frozen
+IDENTITY_ROWS            = list(IDENTITY_TOKEN_IDS.values())  # [32000..32007]
+IDENTITY_FREEZE_STEP_DEFAULT = 5000  # real run default; overridden by --freeze-at-step
 
 if torch.cuda.is_available():
     DEVICE = "cuda"
@@ -78,7 +78,7 @@ if IS_GPU:
         print(f"  GPU {i}: {p.name} ({p.total_memory/1e9:.1f} GB)")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1B MODEL CONFIG
+# MODEL CONFIGS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_1b_config() -> AnthosConfig:
@@ -101,6 +101,35 @@ def get_1b_config() -> AnthosConfig:
         act_aux_coef      = 1e-3,
         lora_rank         = 16,
     )
+
+def get_smoke_config() -> AnthosConfig:
+    # Minimal config for local mechanism testing on M4.
+    # vocab_size=32016 so identity token rows (32000-32007) exist in the embedding.
+    # dim=256, 4 tiny experts, 2 loop iters — fits in <500MB; ~1s/step on MPS.
+    return AnthosConfig(
+        vocab_size        = 32016,
+        dim               = 256,
+        n_heads           = 4,
+        n_kv_heads        = 2,
+        max_seq_len       = 128,
+        max_loop_iters    = 2,
+        prelude_layers    = 1,
+        coda_layers       = 1,
+        n_thought_tokens  = 4,
+        attn_type         = "gqa",
+        n_experts         = 4,
+        n_shared_experts  = 1,
+        n_experts_per_tok = 2,
+        expert_dim        = 128,
+        moe_aux_coef      = 1e-2,
+        act_aux_coef      = 1e-3,
+        lora_rank         = 4,
+    )
+
+def get_config(tier: str) -> AnthosConfig:
+    if tier == "smoke":
+        return get_smoke_config()
+    return get_1b_config()
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CHECKPOINT HELPERS
@@ -176,14 +205,17 @@ def train_loop(
     start_step:   int       = 0,
     is_sft:       bool      = False,
     identity_loss_weight: float = 1.0,
+    freeze_at_step: int     = IDENTITY_FREEZE_STEP_DEFAULT,
+    vocab_size:   int       = 50262,
+    n_loops:      int       = 16,
 ):
     model.train()
     eaft = EAFTLoss(
-        vocab_size      = get_1b_config().vocab_size,
+        vocab_size      = vocab_size,
         top_k           = 50,
         focal_gamma     = 0.5,
         act_gamma       = 0.5,
-        max_loops       = 16,
+        max_loops       = n_loops,
         label_smoothing = 0.05,
     )
     autocast_ctx = (
@@ -219,9 +251,12 @@ def train_loop(
                 # Route through base model when AnthosWithIdentityLock wrapper is present
                 inner = model.base if hasattr(model, "base") else model
                 if is_sft:
-                    input_ids = batch[0].to(DEVICE)[:, :seq_len]
+                    input_ids = batch[0].to(DEVICE)[:, :seq_len].clamp(max=vocab_size - 1)
                     labels    = batch[1].to(DEVICE)[:, :seq_len]
-                    logits, aux = inner(input_ids, n_loops=16, return_aux=True)
+                    # clamp label IDs that aren't identity tokens and aren't -100
+                    _lmask = (labels != -100) & ((labels < 32000) | (labels > 32007))
+                    labels = labels.where(~_lmask, labels.clamp(max=vocab_size - 1))
+                    logits, aux = inner(input_ids, n_loops=n_loops, return_aux=True)
                     loops_used = getattr(inner, "_last_loops_used", None)
                     ce   = eaft(logits, labels, loops_used=loops_used)
                     id_loss = torch.zeros(1, device=logits.device)
@@ -240,7 +275,7 @@ def train_loop(
                 else:
                     input_ids = batch.to(DEVICE)
                     x, y      = input_ids[:, :-1], input_ids[:, 1:]
-                    logits, aux = inner(x, n_loops=16, return_aux=True)
+                    logits, aux = inner(x, n_loops=n_loops, return_aux=True)
                     loops_used = getattr(inner, "_last_loops_used", None)
                     ce   = eaft(logits, y, loops_used=loops_used)
                     loss = (ce + aux) / grad_accum
@@ -257,7 +292,7 @@ def train_loop(
         # instead of accumulating. The copy_-restore in
         # AnthosWithIdentityLock.forward acts as a secondary safety check
         # that undoes any residual weight-decay drift.
-        if step >= IDENTITY_FREEZE_STEP and hasattr(model, "base"):
+        if step >= freeze_at_step and hasattr(model, "base"):
             _embed = getattr(model.base, "embed", None)
             if _embed is not None and _embed.weight.grad is not None:
                 _embed.weight.grad[IDENTITY_ROWS] = 0.0
@@ -278,7 +313,7 @@ def train_loop(
         # identity rows to the frozen snapshot after every optimizer.step().
         # Without this, checkpoints saved between now and full momentum
         # decay would contain drifted embedding values.
-        if step >= IDENTITY_FREEZE_STEP and hasattr(model, "identity_embedding_snapshot"):
+        if step >= freeze_at_step and hasattr(model, "identity_embedding_snapshot"):
             _embed = getattr(model.base, "embed", None)
             if _embed is not None:
                 with torch.no_grad():
@@ -287,7 +322,7 @@ def train_loop(
         step += 1
 
         # ── Momentum decay logging (every 500 steps after freeze) ───────────
-        if (step >= IDENTITY_FREEZE_STEP and step % 500 == 0
+        if (step >= freeze_at_step and step % 500 == 0
                 and hasattr(model, "base")):
             _embed = getattr(model.base, "embed", None)
             if _embed is not None:
@@ -373,35 +408,45 @@ def phase_foundation(resume: str | None = None):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def phase_identity_hardening(
-    resume:    str | None  = None,
-    max_steps: int | None  = None,
-    save_at:   set[int]    = frozenset(),
+    resume:         str | None  = None,
+    max_steps:      int | None  = None,
+    save_at:        set[int]    = frozenset(),
+    tier:           str         = "1b",
+    freeze_at_step: int | None  = None,
 ):
+    is_smoke = (tier == "smoke")
+    cfg      = get_config(tier)
+    ckpt_dir = f"checkpoints/{tier}"
+    _freeze  = freeze_at_step if freeze_at_step is not None else IDENTITY_FREEZE_STEP_DEFAULT
+    _max_steps = max_steps if max_steps is not None else (20_000 if not is_smoke else 20)
+    _seq_len   = cfg.max_seq_len
+    _grad_accum = 1 if is_smoke else 4
+    _save_every = 100 if is_smoke else 2_000
+    _log_every  = 1   if is_smoke else 100
+    _n_loops    = cfg.max_loop_iters
+
     print("\n" + "═"*60)
     print("  PHASE 2 — IDENTITY HARDENING (identity only — no capability data)")
     print("  Creator: Brian Tushae Thomas | Model: Anthos")
+    print(f"  Tier: {tier} | freeze_at_step: {_freeze}")
     print("  Identity bakes into weights before any other learning begins.")
     print("═"*60)
 
-    # Identity phase uses ONLY identity examples — no capability mixing.
-    # Capability data (coding, cybersecurity) is added in Phase 3 AFTER
-    # identity is fully locked into the weights.
     data_path = "data/identity_hardening.jsonl"
     if not Path(data_path).exists():
         print(f"  ERROR: {data_path} not found.")
         print("  Run: python generate_identity_data.py --n 50000")
         sys.exit(1)
 
-    cfg   = get_1b_config()
     _base = Anthos(cfg).to(DEVICE)
-    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=5000)
+    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=_freeze)
     total = sum(p.numel() for p in model.parameters())
     print(f"  Parameters: {total:,}  (base + identity_head)")
 
     # Identity params and embeddings get 3× learning rate.
     # model.named_parameters() includes both base.* and identity_head.* keys.
     #
-    # TRADEOFF: weight_decay=0 applies to the ENTIRE embed tensor (all 50k rows),
+    # TRADEOFF: weight_decay=0 applies to the ENTIRE embed tensor (all vocab rows),
     # not just the 8 identity rows. A row-level split is unsafe because Anthos ties
     # head.weight = embed.weight (main.py:884); splitting that tensor across param
     # groups would register it twice, doubling gradient accumulation. Accepting
@@ -427,14 +472,14 @@ def phase_identity_hardening(
     start_step = 0
     if resume:
         start_step = load(model, optimizer, resume)
-    elif Path("checkpoints/anthos-1b/foundation_final.pt").exists():
-        start_step = load(model, None, "checkpoints/anthos-1b/foundation_final.pt")
+    elif not is_smoke and Path(f"checkpoints/1b/foundation_final.pt").exists():
+        start_step = load(model, None, f"checkpoints/1b/foundation_final.pt")
         print("  ✓ Loaded foundation weights")
 
     tok_path = "data/anthos_tokenizer" if Path("data/anthos_tokenizer").exists() else "gpt2"
     loader = get_chat_dataloader(
-        seq_len        = 512,
-        batch_size     = 4,
+        seq_len        = _seq_len,
+        batch_size     = 1 if is_smoke else 4,
         num_workers    = 4 if DEVICE == "cuda" else 0,
         tokenizer_path = tok_path,
         dataset_name   = data_path,
@@ -445,19 +490,22 @@ def phase_identity_hardening(
         optimizer    = optimizer,
         loader       = loader,
         phase        = "identity_hardening",
-        max_steps    = max_steps if max_steps is not None else 20_000,
+        max_steps    = _max_steps,
         max_lr       = 1e-4,
         min_lr       = 1e-5,
-        warmup_steps = 500,
-        grad_accum   = 4,
-        seq_len      = 512,
-        ckpt_dir     = "checkpoints/anthos-1b",
-        save_every   = 2_000,
+        warmup_steps = max(1, _freeze // 10),
+        grad_accum   = _grad_accum,
+        seq_len      = _seq_len,
+        ckpt_dir     = ckpt_dir,
+        save_every   = _save_every,
         save_at      = save_at,
-        log_every    = 100,
+        log_every    = _log_every,
         start_step   = start_step,
         is_sft       = True,
         identity_loss_weight = 2.0,
+        freeze_at_step = _freeze,
+        vocab_size   = cfg.vocab_size,
+        n_loops      = _n_loops,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -479,7 +527,7 @@ def phase_instruction(resume: str | None = None):
 
     cfg   = get_1b_config()
     _base = Anthos(cfg).to(DEVICE)
-    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=IDENTITY_FREEZE_STEP)
+    model = AnthosWithIdentityLock(_base, hidden_dim=cfg.dim, freeze_after_steps=IDENTITY_FREEZE_STEP_DEFAULT)
     print(f"  Parameters: {sum(p.numel() for p in model.parameters()):,}  (base + identity_head)")
 
     # Mirror Phase 2's param groups so identity weights retain weight_decay=0
@@ -635,6 +683,14 @@ def main():
     parser.add_argument("--save-at", type=str, default=None,
                         help="Comma-separated list of steps to force-save a checkpoint, "
                              "e.g. --save-at 5001,6000 (identity_hardening phase only)")
+    parser.add_argument("--tier", type=str, default="1b", choices=["1b", "smoke"],
+                        help="Model scale: '1b' (default, real run) or 'smoke' "
+                             "(tiny local verification — dim=256, ~2s/step on M4)")
+    parser.add_argument("--freeze-at-step", type=int, default=None,
+                        help="Override AnthosWithIdentityLock freeze_after_steps and "
+                             "train_loop's gradient-masking threshold. Default 5000 "
+                             "for real runs; use --freeze-at-step 5 with --tier smoke "
+                             "for fast local mechanism testing.")
     args = parser.parse_args()
 
     save_at_set: set[int] = set()
@@ -654,9 +710,11 @@ def main():
         phase_grow_3b()
     elif args.phase == "identity_hardening":
         phase_identity_hardening(
-            resume    = args.resume,
-            max_steps = args.max_steps,
-            save_at   = save_at_set,
+            resume         = args.resume,
+            max_steps      = args.max_steps,
+            save_at        = save_at_set,
+            tier           = args.tier,
+            freeze_at_step = args.freeze_at_step,
         )
     else:
         PHASES[args.phase](resume=args.resume)

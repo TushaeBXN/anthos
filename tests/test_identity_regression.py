@@ -143,7 +143,7 @@ def test_momentum(ckpt_path: str) -> None:
         return
 
     print(f"  step: {step:,}")
-    print(f"  identity embedding exp_avg (mean abs): {found_momentum:.6f}")
+    print(f"  identity embedding exp_avg (mean abs): {found_momentum:.2e}")
     print()
     print("  To interpret this number:")
     print("    - Compare against the same metric from a checkpoint just after")
