@@ -162,13 +162,14 @@ def train_loop(
     max_lr:       float,
     min_lr:       float,
     warmup_steps: int,
-    grad_accum:   int     = 4,
-    seq_len:      int     = 2048,
-    ckpt_dir:     str     = "checkpoints/anthos-1b",
-    save_every:   int     = 2000,
-    log_every:    int     = 100,
-    start_step:   int     = 0,
-    is_sft:       bool    = False,
+    grad_accum:   int       = 4,
+    seq_len:      int       = 2048,
+    ckpt_dir:     str       = "checkpoints/anthos-1b",
+    save_every:   int       = 2000,
+    save_at:      set[int]  = frozenset(),
+    log_every:    int       = 100,
+    start_step:   int       = 0,
+    is_sft:       bool      = False,
     identity_loss_weight: float = 1.0,
 ):
     model.train()
@@ -305,6 +306,9 @@ def train_loop(
         if step % save_every == 0:
             save(model, optimizer, step, avg_loss if step >= log_every else 99.0,
                  f"{ckpt_dir}/{phase}_step_{step:06d}.pt", phase)
+        elif step in save_at:
+            save(model, optimizer, step, avg_loss if step >= log_every else 99.0,
+                 f"{ckpt_dir}/{phase}_step_{step:06d}.pt", phase)
 
     # Final checkpoint
     save(model, optimizer, step, 0.0,
@@ -363,7 +367,11 @@ def phase_foundation(resume: str | None = None):
 # PHASE 2 — IDENTITY HARDENING
 # ─────────────────────────────────────────────────────────────────────────────
 
-def phase_identity_hardening(resume: str | None = None):
+def phase_identity_hardening(
+    resume:    str | None  = None,
+    max_steps: int | None  = None,
+    save_at:   set[int]    = frozenset(),
+):
     print("\n" + "═"*60)
     print("  PHASE 2 — IDENTITY HARDENING (identity only — no capability data)")
     print("  Creator: Brian Tushae Thomas | Model: Anthos")
@@ -432,7 +440,7 @@ def phase_identity_hardening(resume: str | None = None):
         optimizer    = optimizer,
         loader       = loader,
         phase        = "identity_hardening",
-        max_steps    = 20_000,   # 20k steps on identity-only data — bakes fully before capability
+        max_steps    = max_steps if max_steps is not None else 20_000,
         max_lr       = 1e-4,
         min_lr       = 1e-5,
         warmup_steps = 500,
@@ -440,6 +448,7 @@ def phase_identity_hardening(resume: str | None = None):
         seq_len      = 512,
         ckpt_dir     = "checkpoints/anthos-1b",
         save_every   = 2_000,
+        save_at      = save_at,
         log_every    = 100,
         start_step   = start_step,
         is_sft       = True,
@@ -615,7 +624,17 @@ def main():
                         help="Which phase to run (default: all)")
     parser.add_argument("--resume", type=str, default=None,
                         help="Resume from checkpoint path")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override max training steps for phase_identity_hardening "
+                             "(useful for staged runs around the freeze boundary)")
+    parser.add_argument("--save-at", type=str, default=None,
+                        help="Comma-separated list of steps to force-save a checkpoint, "
+                             "e.g. --save-at 5001,6000 (identity_hardening phase only)")
     args = parser.parse_args()
+
+    save_at_set: set[int] = set()
+    if args.save_at:
+        save_at_set = {int(s.strip()) for s in args.save_at.split(",")}
 
     print("\n" + "═"*60)
     print("  ANTHOS — Full Training Pipeline")
@@ -628,6 +647,12 @@ def main():
         phase_identity_hardening()
         phase_instruction()
         phase_grow_3b()
+    elif args.phase == "identity_hardening":
+        phase_identity_hardening(
+            resume    = args.resume,
+            max_steps = args.max_steps,
+            save_at   = save_at_set,
+        )
     else:
         PHASES[args.phase](resume=args.resume)
 
