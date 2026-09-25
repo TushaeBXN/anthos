@@ -242,6 +242,43 @@ model = Anthos(cfg)
 
 ---
 
+## Vision (experimental)
+
+[#vision-experimental](#vision-experimental)
+
+Anthos can optionally take images as input, via a CLIP vision encoder lifted
+and adapted from the [ujamaa-multi-modal](https://github.com/TushaeBXN/ujamaa-multi-modal)
+project. Rather than running Ujamaa's full separate transformer as a
+pipeline stage, its vision encoder + projector pattern was ported directly
+into Anthos's own sequence stream — one model, one set of weights.
+
+```python
+from anthos.main   import Anthos, anthos_1b
+from anthos.vision import VisionConfig
+
+model = Anthos(anthos_1b(), vision_cfg=VisionConfig(encoder_name="openai/clip-vit-base-patch32"))
+
+logits = model(input_ids, pixel_values=pixel_values, n_loops=8)
+```
+
+Image patches are projected into Anthos's embedding space and prepended to
+the token sequence as ordinary causal sequence positions — a deliberate
+minimal first cut. `pixel_values` is optional; omitting it runs the
+original text-only path unchanged. The CLIP backbone is frozen by default
+(`freeze_encoder=True`); only the small projector trains until you
+decide otherwise. See `anthos/vision.py` for the full rationale and
+`examples/vision_demo.py` for real end-to-end usage. The projector needs
+image-caption training (Stage A) before outputs are meaningful — see the
+docstring in `examples/vision_demo.py` for the two-stage recipe.
+
+**Known limitation:** image tokens currently attend causally like normal
+sequence tokens rather than non-causally among themselves (the way CLIP
+patches typically see each other). Revisiting this — or routing image
+patches into the non-causal thought stream instead — is a reasonable next
+step once this baseline is validated in training.
+
+---
+
 ## Features
 
 ### Sovereign Rogue — Activation Steering

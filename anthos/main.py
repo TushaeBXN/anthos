@@ -59,6 +59,8 @@ import torch.nn.functional as F
 # at module load time (memory.py imports torch but not anthos.main)
 from anthos.memory     import MemoryBank, MemoryBankConfig, MemoryBankState
 from anthos.lora_pairs import DualLoRAAdapter
+# VisionEncoder/VisionConfig imported lazily inside Anthos.__init__ — keeps
+# `transformers` an optional dependency for text-only training/inference.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -854,12 +856,22 @@ class Anthos(nn.Module):
     Output logits
     """
 
-    def __init__(self, cfg: AnthosConfig):
+    def __init__(self, cfg: AnthosConfig, vision_cfg: Optional["VisionConfig"] = None):
         super().__init__()
         self.cfg = cfg
 
         self.embed       = nn.Embedding(cfg.vocab_size, cfg.dim)
         self.thought_pool = ThoughtTokenPool(cfg.n_thought_tokens, cfg.dim)
+
+        # ── Optional vision front-end ────────────────────────────────────
+        # Lifted from ujamaa-multi-modal's CLIP-based VisionEncoder. Only
+        # constructed when vision_cfg is passed, so text-only checkpoints
+        # and callers who haven't installed `transformers` are unaffected.
+        self.vision_cfg    = vision_cfg
+        self.vision_encoder = None
+        if vision_cfg is not None:
+            from anthos.vision import VisionEncoder
+            self.vision_encoder = VisionEncoder(vision_cfg, anthos_dim=cfg.dim)
 
         # Separate RoPE freq tables for GQA (full head_dim) and MLA (rope_head_dim)
         # Cap precomputed RoPE table at 131 072 tokens to avoid OOM for
@@ -932,24 +944,43 @@ class Anthos(nn.Module):
         return_aux:   bool                      = False,
         memory_state: Optional[MemoryBankState] = None,
         start_pos:    int                       = 0,
+        pixel_values: Optional[torch.Tensor]    = None,
     ):
         """
         Args:
-            input_ids  — (B, T) token indices
-            n_loops    — recurrent depth (defaults to cfg.max_loop_iters)
-            kv_cache   — mutable dict for autoregressive KV caching
-            return_aux — if True return (logits, aux_loss); add aux_loss to CE
-                         during training for load-balancing + ACT regularization
-            start_pos  — position offset for RoPE during autoregressive decoding;
-                         ensures the new token gets the correct rotary position
+            input_ids    — (B, T) token indices
+            n_loops      — recurrent depth (defaults to cfg.max_loop_iters)
+            kv_cache     — mutable dict for autoregressive KV caching
+            return_aux   — if True return (logits, aux_loss); add aux_loss to CE
+                           during training for load-balancing + ACT regularization
+            start_pos    — position offset for RoPE during autoregressive decoding;
+                           ensures the new token gets the correct rotary position
+            pixel_values — optional (B, 3, H, W) image batch. Requires this
+                           Anthos instance to have been constructed with
+                           vision_cfg=... (see anthos/vision.py). When given,
+                           projected image-patch embeddings are prepended to
+                           the token sequence as ordinary (causal) sequence
+                           positions before the Prelude — see vision.py's
+                           docstring for the rationale and known limitation.
 
         Returns:
             logits (B, T, vocab_size)  or  (logits, aux_loss) if return_aux
+            (T reflects any prepended image patches when pixel_values is given)
         """
         B, T    = input_ids.shape
         device  = input_ids.device
 
         x = self.embed(input_ids)                          # (B, T, dim)
+
+        if pixel_values is not None:
+            if self.vision_encoder is None:
+                raise RuntimeError(
+                    "forward() received pixel_values, but this Anthos instance "
+                    "has no vision_encoder. Construct with Anthos(cfg, vision_cfg=VisionConfig(...))."
+                )
+            vis_embeds = self.vision_encoder(pixel_values)   # (B, n_patches, dim)
+            x = torch.cat([vis_embeds, x], dim=1)             # prepend image tokens
+            T = x.shape[1]                                    # extend effective sequence length
 
         use_mla         = (self.cfg.attn_type == "mla")
         freqs_cis       = self._get_rope_freqs(T + start_pos, use_mla=use_mla)[start_pos:]
