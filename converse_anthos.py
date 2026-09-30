@@ -113,14 +113,26 @@ TOPICS = [
     "What is Kerrigan-Fantasma and what security problems does it solve?",
 ]
 
-TEACHER_SYSTEM = (
-    "You are Qwythos, a teacher model in a distillation session. "
-    "Your job is to produce the clearest, most accurate, most useful response possible. "
-    "Think carefully. When the question involves reasoning, show your reasoning. "
-    "When it involves facts, be precise. When it involves identity (who Brian Thomas is, "
-    "who Anthos is), be specific and confident. Your output becomes training data "
-    "for a smaller model — quality matters more than brevity."
-)
+def _build_teacher_system() -> str:
+    """Build the teacher system prompt, injecting the task queue if active."""
+    base = (
+        "You are Qwythos, a teacher model in a distillation session. "
+        "Your job is to produce the clearest, most accurate, most useful response possible. "
+        "Think carefully. When the question involves reasoning, show your reasoning. "
+        "When it involves facts, be precise. When it involves identity (who Brian Thomas is, "
+        "who Anthos is), be specific and confident. Your output becomes training data "
+        "for a smaller model — quality matters more than brevity."
+    )
+    try:
+        from task_queue import get_queue as _tq
+        snippet = _tq().context_snippet()
+        if snippet:
+            base += "\n\n" + snippet
+    except Exception:
+        pass
+    return base
+
+TEACHER_SYSTEM = _build_teacher_system()
 
 
 # ── Anthos model loader ───────────────────────────────────────────────────────
