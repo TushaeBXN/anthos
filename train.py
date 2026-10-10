@@ -28,6 +28,13 @@ from anthos.memory_compress import MemoryAugmentedDataset
 from anthos.distill       import DistillConfig, DistillationLoss, TeacherLabelDataset
 from anthos.eaft          import EAFTLoss
 from anthos.telemetry     import TelemetryHarness
+from anthos.distributed   import (
+    setup_distributed, teardown_distributed,
+    is_main_process, barrier,
+    wrap_ddp, unwrap_model,
+    save_checkpoint_distributed, load_checkpoint_distributed,
+    prune_old_checkpoints,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MANSA CONFIGURATION (HARD-CODED FOR STABILITY)
@@ -62,7 +69,7 @@ def check_moe_collapse(model, model_cfg, step: int) -> float:
         (the model reads cfg.moe_aux_coef each step via aux_loss calculation)
     """
     try:
-        topk_idx = model.recurrent.block.ffn._last_topk_idx  # (N, topk) int
+        topk_idx = model.recurrent.block.ffn._last_topk_idx  # (N, topk) int — rank-0 only
         if topk_idx is None:
             return 0.0
         n_experts = model_cfg.n_experts
@@ -181,27 +188,6 @@ def get_param_groups(model: Anthos, weight_decay: float = 0.1) -> list[dict]:
     ]
 
 
-def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float,
-                    data_step: int = 0, keep: int = 3):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
-    torch.save({
-        "step":      step,
-        "loss":      loss,
-        "data_step": data_step,
-        "model":     model.state_dict(),
-        "optimizer": optimizer.state_dict(),
-        "rng_cpu":   torch.get_rng_state(),
-        "rng_cuda":  torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
-    }, tmp_path)
-    os.replace(tmp_path, path)
-    print(f"  ✓ Saved checkpoint → {path}")
-    # Rolling window — delete oldest beyond `keep`
-    checkpoints = sorted(path.parent.glob("step_*.pt"))
-    for old in checkpoints[:-keep]:
-        old.unlink()
-        print(f"  🗑  Removed old checkpoint {old.name}")
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Main Training Loop
 # ─────────────────────────────────────────────────────────────────────────────
@@ -209,14 +195,24 @@ def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss
 def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None, max_steps: int | None = None):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
+    # ── Distributed setup ─────────────────────────────────────────────────────
+    rank, local_rank, world_size = setup_distributed()
+    is_distributed = world_size > 1
+
     model_cfg, train_cfg = get_training_config(tier)
-    device   = "cuda" if torch.cuda.is_available() else "cpu"
+    if torch.cuda.is_available():
+        device = f"cuda:{local_rank}"
+        torch.cuda.set_device(local_rank)
+    else:
+        device = "cpu"
     ckpt_dir = Path("checkpoints") / train_cfg.run_name
 
     # Determine hardware label for telemetry sidecar
     if torch.cuda.is_available():
-        gpu_name = torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else "unknown_gpu"
+        gpu_name = torch.cuda.get_device_name(local_rank) if torch.cuda.device_count() > 0 else "unknown_gpu"
         _hardware_label = gpu_name.replace(" ", "_")
+        if is_distributed:
+            _hardware_label = f"{_hardware_label}_x{world_size}"
     else:
         _hardware_label = "cpu_only"
     # Stage tag: embedded in every telemetry sidecar so checkpoints stay
@@ -275,6 +271,8 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
+    if is_distributed:
+        model = wrap_ddp(model, local_rank)
 
     # ── Loss functions ────────────────────────────────────────────────────────
     eaft_criterion = EAFTLoss(
@@ -309,56 +307,50 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             print(f"  ⚠ thought-token ID check failed: {_e}")
 
     # ── Which heads are active this run? (resolve ambiguity before training) ──
-    _has_prerouter = hasattr(model.recurrent, "prerouter_head")
-    _has_halt_probs = hasattr(model, "halt_probs") or True  # always exposed via forward
-    print(f"\n{'─'*60}")
-    print(f"  Anthos — Sovereign Training (Mansa Edition)")
-    print(f"  Tier:       {tier}")
-    print(f"  Parameters: {total_params:,}")
-    print(f"  Max Steps:  {MAX_STEPS:,} | Warmup: {WARMUP_STEPS}")
-    print(f"  Max LR:     {MAX_LR} | Loops: {PHASE1_LOOPS}->{PHASE2_LOOPS}")
-    print(f"  Stage tag:  {_stage_tag}")
-    print(f"  ── Active heads ──────────────────────────────────")
-    print(f"    PreRouterHead : {'YES — KL aux loss active' if _has_prerouter else 'NO'}")
-    print(f"    halt_probs    : YES — (B,T,n_loops) exposed on model.halt_probs")
-    print(f"    LoRA recovery : wired in distill.py (not active this tier)")
-    print(f"  ── MoE collapse monitor ──────────────────────────")
-    print(f"    WARN at {MOE_WARN_THRESHOLD:.0%} | AUTO-BUMP at {MOE_BUMP_THRESHOLD:.0%} (×{MOE_BUMP_MULTIPLIER})")
-    if tier == "sft":
-        print(f"  ── Stage 1 expectations ──────────────────────────")
-        print(f"    ~20% Chinchilla budget (195M / 960M tokens)")
-        print(f"    Hallucination and short-context loss are EXPECTED — not bugs")
-        print(f"    Goal: validate loss curve shape, ACT stability, MoE routing spread")
-    print(f"{'─'*60}\n")
+    _raw_model = unwrap_model(model)
+    _has_prerouter  = hasattr(_raw_model.recurrent, "prerouter_head")
+    _has_halt_probs = hasattr(_raw_model, "halt_probs") or True
+    if is_main_process():
+        print(f"\n{'─'*60}")
+        print(f"  Anthos — Sovereign Training (Mansa Edition)")
+        print(f"  Tier:       {tier}")
+        print(f"  Parameters: {total_params:,}")
+        print(f"  GPUs:       {world_size} ({'DDP' if is_distributed else 'single'})")
+        print(f"  Max Steps:  {MAX_STEPS:,} | Warmup: {WARMUP_STEPS}")
+        print(f"  Max LR:     {MAX_LR} | Loops: {PHASE1_LOOPS}->{PHASE2_LOOPS}")
+        print(f"  Stage tag:  {_stage_tag}")
+        print(f"  ── Active heads ──────────────────────────────────")
+        print(f"    PreRouterHead : {'YES — KL aux loss active' if _has_prerouter else 'NO'}")
+        print(f"    halt_probs    : YES — (B,T,n_loops) exposed on model.halt_probs")
+        print(f"    LoRA recovery : wired in distill.py (not active this tier)")
+        print(f"  ── MoE collapse monitor ──────────────────────────")
+        print(f"    WARN at {MOE_WARN_THRESHOLD:.0%} | AUTO-BUMP at {MOE_BUMP_THRESHOLD:.0%} (×{MOE_BUMP_MULTIPLIER})")
+        if tier == "sft":
+            print(f"  ── Stage 1 expectations ──────────────────────────")
+            print(f"    ~20% Chinchilla budget (195M / 960M tokens)")
+            print(f"    Hallucination and short-context loss are EXPECTED — not bugs")
+            print(f"    Goal: validate loss curve shape, ACT stability, MoE routing spread")
+        print(f"{'─'*60}\n")
 
-    use_fused = True if device == "cuda" else False
-    param_groups = get_param_groups(model, weight_decay=0.1)
+    use_fused = device.startswith("cuda")
+    param_groups = get_param_groups(unwrap_model(model), weight_decay=0.1)
     optimizer = AdamW(param_groups, lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
     n_decay    = sum(p.numel() for p in param_groups[0]["params"])
     n_no_decay = sum(p.numel() for p in param_groups[1]["params"])
-    print(f"  Optimizer: decay {n_decay:,} params | no-decay {n_no_decay:,} params | wd=0.1")
+    if is_main_process():
+        print(f"  Optimizer: decay {n_decay:,} params | no-decay {n_no_decay:,} params | wd=0.1")
 
     start_step = 0
     if resume:
-        ckpt = torch.load(resume, map_location=device, weights_only=False)
-        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
-        if missing:
-            print(f"  ℹ New params (randomly init): {len(missing)} tensors — e.g. {missing[0]}")
-        if tier in ("sft", "instruct", "convo_smoke", "history", "code"):
-            start_step = ckpt.get("step", 0) if tier == "code" else 0
-            print(f"  ✓ {tier} mode: optimizer state reset (fresh Adam at {MAX_LR}), resuming from step {start_step}")
-        else:
-            try:
-                optimizer.load_state_dict(ckpt["optimizer"])
-                start_step = ckpt["step"]
-                if "rng_cpu" in ckpt:
-                    torch.set_rng_state(ckpt["rng_cpu"])
-                if "rng_cuda" in ckpt and ckpt["rng_cuda"] and torch.cuda.is_available():
-                    torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
-                print(f"  ✓ Restored RNG state from checkpoint")
-            except ValueError:
-                start_step = 0
-                print(f"  ℹ Optimizer groups changed (new modules added) — resetting optimizer, resuming from step 0")
+        _opt_for_load = None if tier in ("sft", "instruct", "convo_smoke", "history", "code") else optimizer
+        meta = load_checkpoint_distributed(
+            Path(resume), model, optimizer=_opt_for_load, device=device
+        )
+        start_step = meta.get("step", 0)
+        if tier in ("sft", "instruct", "convo_smoke", "history", "code") and tier != "code":
+            start_step = 0
+        if is_main_process():
+            print(f"  ✓ Resumed from {resume} at step {start_step}")
 
     is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening", "code"))
     is_distill  = (tier == "distill")
@@ -526,8 +518,9 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     _gnorm_ema        = None   # exponential moving average for spike detection
     t0                = time.time()
 
-    print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
-    print(f"  ⏳ First log will appear after step {LOG_EVERY} (may take 1-2 min on CPU)...", flush=True)
+    if is_main_process():
+        print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
+        print(f"  ⏳ First log will appear after step {LOG_EVERY} (may take 1-2 min on CPU)...", flush=True)
 
     while step < MAX_STEPS:
         lr     = get_lr(step)
@@ -607,19 +600,21 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             _gnorm_ema = grad_norm
         else:
             _gnorm_ema = 0.98 * _gnorm_ema + 0.02 * grad_norm
-            if grad_norm > 3.0 * _gnorm_ema and grad_norm > 1.0:
+            if grad_norm > 3.0 * _gnorm_ema and grad_norm > 1.0 and is_main_process():
                 print(f"  ⚡ Grad norm spike at step {step+1}: {grad_norm:.2f} (ema={_gnorm_ema:.2f})", flush=True)
         optimizer.step()
         step += 1
 
-        if step % LOG_EVERY == 0:
+        if step % LOG_EVERY == 0 and is_main_process():
             t1            = time.time()
             avg_loss      = loss_accum      / (LOG_EVERY * train_cfg.grad_accum)
             avg_aux       = aux_accum       / (LOG_EVERY * train_cfg.grad_accum)
             avg_prerouter = prerouter_accum / (LOG_EVERY * train_cfg.grad_accum)
             avg_gnorm     = gnorm_accum     / LOG_EVERY
-            tok_sec       = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
-            top1_frac     = check_moe_collapse(model, model_cfg, step)
+            # Scale tok/s by world_size — all GPUs processed batches in parallel
+            tok_sec = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum
+                       * SEQ_LEN * world_size) / (t1 - t0)
+            top1_frac = check_moe_collapse(unwrap_model(model), model_cfg, step)
             print(
                 f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
                 f"prerouter_kl {avg_prerouter:.4f} | gnorm {avg_gnorm:.3f} | "
@@ -631,32 +626,44 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
         if step % SAVE_EVERY == 0:
             _ckpt_path = ckpt_dir / f"step_{step:06d}.pt"
-            save_checkpoint(_ckpt_path, model, optimizer, step, avg_loss, data_step=data_step)
-            try:
-                _tel = _telemetry_harness.record(model, tokenizer=None, ckpt_path=str(_ckpt_path), step=step)
-                # Attach training-loop scalars so the sidecar captures the live run state
-                _tel["train_scalars"] = {
-                    "loss":         round(avg_loss,      5),
-                    "aux":          round(avg_aux,        5),
-                    "prerouter_kl": round(avg_prerouter,  5),
-                    "grad_norm":    round(avg_gnorm,      4),
-                    "moe_aux_coef": model_cfg.moe_aux_coef,
-                }
-                import json as _json
-                _sidecar_path = str(_ckpt_path).replace(".pt", ".telemetry.json")
-                Path(_sidecar_path).write_text(_json.dumps(_tel, indent=2))
-                print(f"  ✓ Telemetry sidecar written → {_sidecar_path}")
-            except Exception as _te:
-                print(f"  ⚠ Telemetry skipped: {_te}")
-            print("\n── Sample outputs ─────────────────────────────────────")
-            try:
-                for sample in generate_samples(model, device, n_loops, tokenizer_path=tok_path):
-                    print(f"  {sample[:200]}\n")
-            except Exception as e:
-                print(f"  ⚠ Sample generation failed: {e}")
-            print("────────────────────────────────────────────────────────\n")
+            save_checkpoint_distributed(
+                _ckpt_path, model, optimizer, step, avg_loss, data_step=data_step
+            )
+            prune_old_checkpoints(ckpt_dir, keep=3)
+            if is_main_process():
+                try:
+                    _tel = _telemetry_harness.record(
+                        unwrap_model(model), tokenizer=None,
+                        ckpt_path=str(_ckpt_path), step=step,
+                    )
+                    _tel["train_scalars"] = {
+                        "loss":         round(avg_loss,      5),
+                        "aux":          round(avg_aux,        5),
+                        "prerouter_kl": round(avg_prerouter,  5),
+                        "grad_norm":    round(avg_gnorm,      4),
+                        "moe_aux_coef": model_cfg.moe_aux_coef,
+                        "world_size":   world_size,
+                    }
+                    import json as _json
+                    _sidecar_path = str(_ckpt_path).replace(".pt", ".telemetry.json")
+                    Path(_sidecar_path).write_text(_json.dumps(_tel, indent=2))
+                    print(f"  ✓ Telemetry sidecar written → {_sidecar_path}")
+                except Exception as _te:
+                    print(f"  ⚠ Telemetry skipped: {_te}")
+                print("\n── Sample outputs ─────────────────────────────────────")
+                try:
+                    for sample in generate_samples(
+                        unwrap_model(model), device, n_loops, tokenizer_path=tok_path
+                    ):
+                        print(f"  {sample[:200]}\n")
+                except Exception as e:
+                    print(f"  ⚠ Sample generation failed: {e}")
+                print("────────────────────────────────────────────────────────\n")
+            barrier()
 
-    print(f"\n✓ Sovereign Training complete — {step} steps")
+    if is_main_process():
+        print(f"\n✓ Sovereign Training complete — {step} steps")
+    teardown_distributed()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
