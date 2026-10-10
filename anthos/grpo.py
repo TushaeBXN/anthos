@@ -641,13 +641,23 @@ class GRPOTrainer:
 
         kl = (policy_log_probs - ref_log_probs).mean(dim=-1)   # (V,)
 
-        # ── 5. Policy gradient loss ────────────────────────────────────────
-        seq_len      = (labels[:, 1:] >= 0).float().sum(dim=-1).clamp(min=1)
-        seq_log_prob = policy_log_probs.sum(dim=-1) / seq_len   # (V,)
+        # ── 5. Policy gradient loss (Dr. GRPO — token-level, unbiased) ───────
+        # Standard GRPO divides by seq_len then multiplies by advantage,
+        # which biases the gradient: short completions get disproportionate
+        # weight because each token's contribution is inflated.
+        #
+        # Dr. GRPO broadcasts the sequence-level advantage to every token
+        # position and computes the mean over *valid* tokens directly.
+        # This is the unbiased formulation from the Dr. GRPO paper.
+        token_mask = (labels[:, 1:] >= 0).float()                  # (V, T-1)
+        n_valid    = token_mask.sum().clamp(min=1)
 
-        pg_loss  = -(advantages * seq_log_prob).mean()
-        kl_loss  = self.cfg.kl_coef * kl.mean()
-        entropy  = -policy_log_probs.mean()
+        # Expand advantages from (V,) to (V, T-1) by broadcasting
+        adv_per_token = advantages.unsqueeze(1) * token_mask        # (V, T-1)
+
+        pg_loss  = -(adv_per_token * policy_log_probs).sum() / n_valid
+        kl_loss  = self.cfg.kl_coef * (kl * token_mask.mean(dim=-1)).mean()
+        entropy  = -(policy_log_probs * token_mask).sum() / n_valid
         ent_loss = -self.cfg.entropy_bonus * entropy
 
         return pg_loss + kl_loss + ent_loss
