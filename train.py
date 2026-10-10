@@ -93,6 +93,34 @@ def get_lr(step: int) -> float:
     progress = (step - WARMUP_STEPS) / (MAX_STEPS - WARMUP_STEPS)
     return MIN_LR + 0.5 * (MAX_LR - MIN_LR) * (1 + math.cos(math.pi * progress))
 
+
+def get_lr_wsd(step: int, decay_frac: float = 0.1) -> float:
+    """
+    Warmup-Stable-Decay schedule (OLMo-core / MiniCPM).
+
+    Three phases:
+      [0, WARMUP_STEPS)        — linear ramp from 0 to MAX_LR
+      [WARMUP_STEPS, decay_start) — constant MAX_LR  (stable phase)
+      [decay_start, MAX_STEPS]    — cosine decay to MIN_LR
+
+    decay_frac controls what fraction of steps are in the decay phase.
+    decay_frac=0.1 → last 10% of steps decay; 0.2 → last 20%.
+
+    Advantages over cosine-only:
+      - Model trains at peak LR longer → better token utilisation
+      - Sharp decay at the end improves final eval metrics
+      - Easy to extend training: simply prolong the stable phase
+    """
+    if step < WARMUP_STEPS:
+        return MAX_LR * (step + 1) / WARMUP_STEPS
+    decay_start = int(MAX_STEPS * (1.0 - decay_frac))
+    if step < decay_start:
+        return MAX_LR
+    if step >= MAX_STEPS:
+        return MIN_LR
+    progress = (step - decay_start) / (MAX_STEPS - decay_start)
+    return MIN_LR + 0.5 * (MAX_LR - MIN_LR) * (1 + math.cos(math.pi * progress))
+
 def get_n_loops(step: int) -> int:
     return PHASE1_LOOPS if step < PHASE1_STEPS else PHASE2_LOOPS
 

@@ -94,6 +94,13 @@ class GRPOConfig:
     clip_advantages:  float = 5.0     # clip advantages to [-clip, +clip]
     loop_eff_coef:    float = 0.1     # weight for loop efficiency reward
     normalize_reward: bool  = True    # normalise rewards within group
+    # Clip-higher (DAPO): asymmetric ratio clipping.
+    # Low end clips at 1-clip_eps; high end at 1+clip_eps*clip_high_mu.
+    # clip_high_mu > 1 allows larger upward updates while still bounding
+    # downward ones — stops the policy collapsing on hard prompts.
+    # Set clip_eps=0.0 to disable ratio clipping (REINFORCE mode).
+    clip_eps:         float = 0.2     # lower clip epsilon
+    clip_high_mu:     float = 3.0     # high clip = 1 + clip_eps * clip_high_mu
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -415,6 +422,61 @@ def get_tag_count_reward(tags: Optional[list] = None):
     return tag_count_reward
 
 
+def get_accuracy_reward(answer_pattern: str = r"<answer>(.*?)</answer>"):
+    """
+    Factory: binary reward for verifiable answer correctness.
+
+    Parses the model's completion for a final answer tag and compares it
+    to a ground-truth string embedded in the prompt.  Returns:
+      +1.0  correct answer
+       0.0  wrong answer or unparseable
+      None  prompt carries no ground-truth (skip — don't penalise)
+
+    Prompt format expected:
+        "... <ground_truth>42</ground_truth> ..."
+
+    Completion format expected:
+        "... <answer>42</answer>"
+
+    Usage:
+        acc_reward = get_accuracy_reward()
+        trainer = GRPOTrainer(..., reward_fn=acc_reward)
+    """
+    import re as _re
+    ans_pat = _re.compile(answer_pattern, _re.DOTALL)
+    gt_pat  = _re.compile(r"<ground_truth>(.*?)</ground_truth>", _re.DOTALL)
+
+    def accuracy_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for prompt_ids, comp_ids in zip(prompts, completions):
+            prompt_text = tokenizer.decode(
+                prompt_ids.tolist(), skip_special_tokens=True
+            )
+            gt_match = gt_pat.search(prompt_text)
+            if gt_match is None:
+                rewards.append(None)   # no ground truth — skip
+                continue
+
+            ground_truth = gt_match.group(1).strip()
+            comp_text    = tokenizer.decode(
+                comp_ids.tolist(), skip_special_tokens=True
+            )
+            ans_match = ans_pat.search(comp_text)
+            if ans_match is None:
+                rewards.append(0.0)    # didn't produce an answer tag
+                continue
+
+            predicted = ans_match.group(1).strip()
+            rewards.append(1.0 if predicted == ground_truth else 0.0)
+        return rewards
+
+    return accuracy_reward
+
+
 def loop_efficiency_reward(
     loops_used:  torch.Tensor,   # (B, T) from ACT
     max_loops:   int,
@@ -641,21 +703,32 @@ class GRPOTrainer:
 
         kl = (policy_log_probs - ref_log_probs).mean(dim=-1)   # (V,)
 
-        # ── 5. Policy gradient loss (Dr. GRPO — token-level, unbiased) ───────
-        # Standard GRPO divides by seq_len then multiplies by advantage,
-        # which biases the gradient: short completions get disproportionate
-        # weight because each token's contribution is inflated.
+        # ── 5. Policy gradient loss (Dr. GRPO + clip-higher) ──────────────
+        # Dr. GRPO: broadcast sequence advantage to every token, average over
+        # valid tokens — unbiased vs. the divide-by-seq_len formulation.
         #
-        # Dr. GRPO broadcasts the sequence-level advantage to every token
-        # position and computes the mean over *valid* tokens directly.
-        # This is the unbiased formulation from the Dr. GRPO paper.
+        # Clip-higher (DAPO): use importance-sampling ratios with asymmetric
+        # clipping.  Low end: 1-ε (standard PPO bound).
+        # High end: 1+ε*μ (allows larger upward updates, blocks collapse).
+        # When clip_eps==0 this reduces to plain REINFORCE.
         token_mask = (labels[:, 1:] >= 0).float()                  # (V, T-1)
         n_valid    = token_mask.sum().clamp(min=1)
 
-        # Expand advantages from (V,) to (V, T-1) by broadcasting
         adv_per_token = advantages.unsqueeze(1) * token_mask        # (V, T-1)
 
-        pg_loss  = -(adv_per_token * policy_log_probs).sum() / n_valid
+        if self.cfg.clip_eps > 0:
+            # Ratio r_t = exp(log π_θ - log π_ref) per token
+            ratio = torch.exp(policy_log_probs - ref_log_probs.detach())  # (V, T-1)
+            lo = 1.0 - self.cfg.clip_eps
+            hi = 1.0 + self.cfg.clip_eps * self.cfg.clip_high_mu
+            clipped_ratio = ratio.clamp(lo, hi)
+            # Take the pessimistic bound (standard PPO trick)
+            pg_per_token  = torch.min(ratio * adv_per_token,
+                                      clipped_ratio * adv_per_token)
+            pg_loss = -pg_per_token.sum() / n_valid
+        else:
+            pg_loss = -(adv_per_token * policy_log_probs).sum() / n_valid
+
         kl_loss  = self.cfg.kl_coef * (kl * token_mask.mean(dim=-1)).mean()
         entropy  = -(policy_log_probs * token_mask).sum() / n_valid
         ent_loss = -self.cfg.entropy_bonus * entropy
