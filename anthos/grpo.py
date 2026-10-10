@@ -238,6 +238,70 @@ def get_cosine_length_reward(
     return cosine_length_reward
 
 
+def get_soft_overlong_punishment(max_completion_len: int, buffer: int = 20):
+    """
+    Factory: soft overlong punishment for token-level length control.
+
+    Adapted from the DAPO paper (https://huggingface.co/papers/2503.14476),
+    Eq. 13. Pairs naturally with Anthos's ACT halting: ACT controls loop
+    depth, this controls token length ceiling. Together they give the model
+    two orthogonal compute-efficiency signals.
+
+    Three zones:
+      [0, max_completion_len - buffer]   → 0.0       (no penalty)
+      (max_completion_len - buffer,
+       max_completion_len]               → linearly from 0.0 → -1.0  (soft zone)
+      (max_completion_len, ∞)            → -1.0      (hard cap)
+
+    The soft zone prevents a hard cliff that can cause instability early in
+    GRPO training — the model receives a gradient signal before hitting the
+    ceiling rather than being shocked at a single token boundary.
+
+    Args:
+        max_completion_len: token length beyond which penalty is -1.0
+        buffer:             width of the soft-ramp zone (default 20 tokens)
+
+    Usage:
+        overlong = get_soft_overlong_punishment(max_completion_len=256, buffer=32)
+        rewards  = overlong(prompts, completions, tokenizer)
+
+    Recommended stacking with quality_reward:
+        def combined(prompts, completions, tokenizer):
+            q = quality_reward(prompts, completions, tokenizer)
+            o = overlong(prompts, completions, tokenizer)
+            return [
+                None if (qi is None) else qi + oi
+                for qi, oi in zip(q, o)
+            ]
+    """
+    if buffer <= 0:
+        raise ValueError(f"buffer must be > 0, got {buffer}")
+    if max_completion_len <= buffer:
+        raise ValueError(
+            f"max_completion_len ({max_completion_len}) must be > buffer ({buffer})"
+        )
+
+    def soft_overlong_punishment_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for completion in completions:
+            length = len(completion.tolist())
+            if length <= max_completion_len - buffer:
+                rewards.append(0.0)
+            elif length <= max_completion_len:
+                # Linear ramp: 0.0 at (max - buffer), -1.0 at max
+                penalty = (max_completion_len - buffer - length) / buffer
+                rewards.append(float(penalty))
+            else:
+                rewards.append(-1.0)
+        return rewards
+
+    return soft_overlong_punishment_reward
+
+
 def loop_efficiency_reward(
     loops_used:  torch.Tensor,   # (B, T) from ACT
     max_loops:   int,
