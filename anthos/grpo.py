@@ -477,6 +477,68 @@ def get_accuracy_reward(answer_pattern: str = r"<answer>(.*?)</answer>"):
     return accuracy_reward
 
 
+def get_token_level_reward(
+    think_tag:       str   = "<think>",
+    think_end_tag:   str   = "</think>",
+    think_weight:    float = 0.3,
+    answer_weight:   float = 1.0,
+):
+    """
+    Factory: per-token reward weights based on which section a token is in.
+
+    Returns a reward function that produces a list of (T,) tensors — one
+    per completion — where each position's value is:
+      - think_weight   inside <think>...</think> blocks (reasoning tokens)
+      - answer_weight  everywhere else (answer tokens)
+
+    These per-token weights are multiplied against the sequence-level reward
+    in GRPOTrainer.step() when passed as extra_rewards.  This teaches the
+    model to allocate its reasoning budget more efficiently: reasoning tokens
+    are down-weighted so the policy gradient focuses on answer quality, while
+    still rewarding non-degenerate thinking.
+
+    Usage:
+        tok_rw = get_token_level_reward(think_weight=0.2, answer_weight=1.0)
+        trainer = GRPOTrainer(..., reward_fn=combined_reward)
+        # Pass tok_rw output as extra_rewards in trainer.step()
+    """
+    def token_level_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for comp_ids in completions:
+            text   = tokenizer.decode(comp_ids.tolist(), skip_special_tokens=False)
+            tokens = tokenizer.convert_ids_to_tokens(comp_ids.tolist())
+            T      = len(tokens)
+
+            # Locate think regions character-by-character then map back to tokens
+            weights = [answer_weight] * T
+            pos     = 0
+            char_offset = 0
+            token_char_starts = []
+            for tok in tokens:
+                token_char_starts.append(char_offset)
+                char_offset += len(tok.replace("Ġ", " ").replace("Ċ", "\n"))
+
+            inside = False
+            for i, (tok, start) in enumerate(zip(tokens, token_char_starts)):
+                substr = text[start:]
+                if not inside and substr.startswith(think_tag):
+                    inside = True
+                if inside:
+                    weights[i] = think_weight
+                if inside and substr.startswith(think_end_tag):
+                    inside = False
+
+            # Aggregate to a single scalar: mean weight across tokens
+            rewards.append(float(sum(weights) / max(T, 1)))
+        return rewards
+
+    return token_level_reward
+
+
 def loop_efficiency_reward(
     loops_used:  torch.Tensor,   # (B, T) from ACT
     max_loops:   int,
@@ -675,13 +737,27 @@ class GRPOTrainer:
                 for r, e in zip(raw_rewards, extra_rewards)
             ]
 
-        # Filter out None-skipped completions
+        # ── Online filtering ───────────────────────────────────────────────
+        # Skip the step entirely (no forward/backward) when there's nothing
+        # to learn from:
+        #   1. All reward functions returned None (unscoreable completions)
+        #   2. All valid rewards are identical (zero-variance → zero gradient)
+        # This is more aggressive than just zeroing advantages after the fact —
+        # we avoid wasting compute on a guaranteed zero-update step.
         valid_mask = [r is not None for r in raw_rewards]
         if not any(valid_mask):
-            return None   # all completions skipped — no loss to compute
+            return None   # all completions unscoreable
 
         valid_idx     = [i for i, v in enumerate(valid_mask) if v]
         valid_rewards = [raw_rewards[i] for i in valid_idx]
+
+        # Check for zero-variance before allocating any tensors
+        if len(valid_rewards) > 1:
+            r_min = min(valid_rewards)
+            r_max = max(valid_rewards)
+            if r_max - r_min < 1e-6:
+                return None   # all identical rewards — no gradient signal
+
         valid_comps   = completions[valid_idx]   # (V, T_total)
 
         advantages = self._compute_advantages(valid_rewards).to(device)   # (V,)
