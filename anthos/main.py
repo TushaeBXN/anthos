@@ -146,6 +146,14 @@ class AnthosConfig:
     # Disable for inference (kv_cache path skips checkpointing automatically).
     gradient_checkpointing: bool = False
 
+    # YaRN RoPE scaling: extend context beyond max_seq_len at inference time.
+    # Set rope_scaling_type="yarn" and rope_scaling_factor > 1.0 to enable.
+    # Example: trained at max_seq_len=4096, extend to 32k with factor=8.0.
+    # factor=1.0 → no scaling (disabled, default).
+    # Reference: Peng et al. 2023 "YaRN: Efficient Context Window Extension"
+    rope_scaling_type:   str   = "none"    # "none" | "yarn" | "linear"
+    rope_scaling_factor: float = 1.0       # > 1.0 to extend context
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalization
@@ -171,6 +179,81 @@ def precompute_rope_freqs(dim: int, max_len: int, theta: float = 500000.0) -> to
     t     = torch.arange(max_len, dtype=torch.float32)
     freqs = torch.outer(t, freqs)
     return torch.polar(torch.ones_like(freqs), freqs)   # complex64 (max_len, dim//2)
+
+
+def precompute_rope_freqs_yarn(
+    dim:        int,
+    max_len:    int,
+    theta:      float = 500000.0,
+    factor:     float = 8.0,
+    beta_fast:  int   = 32,
+    beta_slow:  int   = 1,
+    mscale:     float = 0.1,
+) -> torch.Tensor:
+    """
+    YaRN (Yet another RoPE extensioN) — extend context window beyond training length.
+
+    YaRN interpolates RoPE frequencies differently per head dimension:
+      - Low-frequency dims (long-range): extrapolate (no rescaling needed)
+      - High-frequency dims (short-range): interpolate (divide by factor)
+      - Mid-range: smoothly blend between the two via a ramp
+
+    This preserves local attention (short-range dims unchanged) while letting
+    long-range dims attend to extended positions.
+
+    Usage:
+        # Model trained at 4096; extend to 32k at inference time
+        cfg.rope_scaling_type   = "yarn"
+        cfg.rope_scaling_factor = 8.0   # 32768 / 4096
+
+    Args:
+        dim:       RoPE head dimension
+        max_len:   Target context length (after extension)
+        theta:     Base RoPE frequency (default 500000.0, same as training)
+        factor:    Extension factor = new_ctx / train_ctx (e.g. 8.0 for 8×)
+        beta_fast: High-frequency cutoff (dim index, default 32)
+        beta_slow: Low-frequency cutoff  (dim index, default 1)
+        mscale:    Attention magnitude scale (default 0.1, per YaRN paper)
+    """
+    half_dim = dim // 2
+    # Original frequencies
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+
+    # YaRN ramp: r(i) smoothly blends between linear interp and extrapolation
+    low  = math.log(factor) / math.log(beta_fast) * half_dim
+    high = math.log(factor) / math.log(beta_slow) * half_dim
+    ramp = torch.clamp(
+        (torch.arange(half_dim, dtype=torch.float32) - low) / (high - low + 1e-6),
+        0.0, 1.0,
+    )
+
+    # Interpolated frequencies: divide by factor in the high-freq end
+    freqs_interp = freqs / factor
+    freqs_yarn   = freqs_interp * (1 - ramp) + freqs * ramp
+
+    # Attention magnitude correction (prevents softmax saturation at long range)
+    attn_scale = 1.0 + mscale * math.log(factor)
+
+    t     = torch.arange(max_len, dtype=torch.float32)
+    outer = torch.outer(t, freqs_yarn) * attn_scale
+    return torch.polar(torch.ones_like(outer), outer)   # complex64
+
+
+def precompute_rope_freqs_linear(
+    dim:     int,
+    max_len: int,
+    theta:   float = 500000.0,
+    factor:  float = 8.0,
+) -> torch.Tensor:
+    """
+    Linear RoPE scaling (position interpolation, Chen et al. 2023).
+    Simpler than YaRN but degrades on tasks needing precise short-range attention.
+    All frequencies divided by factor uniformly.
+    """
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 2, dtype=torch.float32) / dim))
+    freqs = freqs / factor
+    t     = torch.arange(max_len, dtype=torch.float32)
+    return torch.polar(torch.ones_like(torch.outer(t, freqs)), torch.outer(t, freqs))
 
 
 def apply_rope(x: torch.Tensor, freqs_cis: torch.Tensor) -> torch.Tensor:
@@ -916,9 +999,23 @@ class Anthos(nn.Module):
         # configs with max_seq_len=1_000_000 (anthos_100b).  Longer contexts
         # are handled at runtime by _get_rope_freqs() via NTK dynamic scaling.
         _precompute_len = min(cfg.max_seq_len, 131_072)
-        freqs = precompute_rope_freqs(cfg.dim // cfg.n_heads, _precompute_len, cfg.rope_theta)
+
+        # Select RoPE frequency constructor based on scaling config
+        _rope_kwargs = dict(theta=cfg.rope_theta)
+        if cfg.rope_scaling_type == "yarn" and cfg.rope_scaling_factor > 1.0:
+            _rope_fn = lambda d, l: precompute_rope_freqs_yarn(
+                d, l, factor=cfg.rope_scaling_factor, **_rope_kwargs
+            )
+        elif cfg.rope_scaling_type == "linear" and cfg.rope_scaling_factor > 1.0:
+            _rope_fn = lambda d, l: precompute_rope_freqs_linear(
+                d, l, factor=cfg.rope_scaling_factor, **_rope_kwargs
+            )
+        else:
+            _rope_fn = lambda d, l: precompute_rope_freqs(d, l, **_rope_kwargs)
+
+        freqs = _rope_fn(cfg.dim // cfg.n_heads, _precompute_len)
         self.register_buffer("freqs_cis", freqs)
-        freqs_mla = precompute_rope_freqs(cfg.qk_rope_head_dim, _precompute_len, cfg.rope_theta)
+        freqs_mla = _rope_fn(cfg.qk_rope_head_dim, _precompute_len)
         self.register_buffer("freqs_cis_mla", freqs_mla)
 
         self.prelude = nn.ModuleList(

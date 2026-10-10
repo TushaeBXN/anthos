@@ -59,17 +59,37 @@ python train.py --tier proof --compile
 # ~60% less activation memory, ~30% more compute — enables larger batches
 python train.py --tier proof --grad-checkpoint
 
-# Combine both for maximum throughput at minimum memory
+# 8-bit AdamW (bitsandbytes) — ~75% optimizer state memory savings
+# Requires: pip install bitsandbytes
+python train.py --tier proof --8bit-adam
+
+# Curriculum learning — ramp seq len from SEQ_LEN/8 → SEQ_LEN over first 10% of steps
+python train.py --tier proof --curriculum
+
+# Loss spike auto-rollback — restores last checkpoint when loss > 4× EMA
+python train.py --tier proof --spike-rollback --spike-factor 4.0
+
+# Wandb logging (requires: pip install wandb)
+python train.py --tier proof --wandb --wandb-project anthos
+
+# TensorBoard logging (view with: tensorboard --logdir runs/)
+python train.py --tier proof --tb
+
+# Full performance stack: compile + grad-ckpt + 8-bit-adam + curriculum
 torchrun --nproc_per_node=4 train.py --tier sft \
          --resume checkpoints/proof/step_010000.pt \
-         --compile --grad-checkpoint
+         --compile --grad-checkpoint --8bit-adam --curriculum
 ```
 
 | Flag | Memory impact | Speed impact | When to use |
 |------|--------------|-------------|-------------|
 | `--compile` | none | +20-40% | Always on A100+, skip on CPU |
 | `--grad-checkpoint` | -60% activations | -30% | When OOM on large batches |
-| Both | -60% activations | net ~0-10% gain | Large models / long sequences |
+| `--8bit-adam` | -75% opt state | negligible | Long runs, always beneficial |
+| `--curriculum` | none | none | First pretraining from scratch |
+| `--spike-rollback` | none | none | Unstable data or noisy runs |
+| `--wandb` / `--tb` | none | none | Monitoring any run |
+| Both compile+ckpt | -60% activations | net ~0-10% gain | Large models / long seqs |
 
 ---
 
@@ -239,6 +259,64 @@ lr = get_lr_wsd(step, decay_frac=0.1)  # last 10% of steps decay
 
 ---
 
+## Alignment Methods
+
+Anthos ships four alignment trainers for different data availability scenarios:
+
+| Method | Data format | Reference model | Best when |
+|--------|------------|----------------|-----------|
+| **DPO** (`anthos/dpo.py`) | {prompt, chosen, rejected} pairs | Frozen copy of SFT checkpoint | You have paired preference data |
+| **KTO** (`anthos/kto.py`) | {prompt, completion, label} unpaired | Frozen copy of SFT checkpoint | Binary good/bad labels are easier to get than pairs |
+| **SimPO** (in `dpo.py`) | {prompt, chosen, rejected} pairs | None (no reference needed) | No reference checkpoint available |
+| **RFT** (`anthos/rft.py`) | {prompt} → filtered completions | None | Self-improvement loop; warm-up before GRPO |
+
+### KTO — recommended first alignment step
+
+KTO requires only binary labels (good/bad) with no pairing. This is the fastest to annotate and works well even from a small labelled set:
+
+```python
+from anthos.kto import KTOTrainer, KTODataset, KTOConfig, kto_collate
+from torch.utils.data import DataLoader
+
+trainer = KTOTrainer.from_pretrained(
+    "checkpoints/sft/step_000500.pt",
+    model_class=Anthos, cfg=model_cfg,
+    kto_config=KTOConfig(beta=0.1),
+)
+dataset = KTODataset("data/feedback.jsonl")   # {prompt, completion, label}
+loader  = DataLoader(dataset, batch_size=4, collate_fn=kto_collate)
+for batch in loader:
+    loss, metrics = trainer.step(batch)
+    loss.backward(); optimizer.step()
+```
+
+Data format for `data/feedback.jsonl`:
+```json
+{"prompt": "Explain recursion", "completion": "Recursion is...", "label": true}
+{"prompt": "Write a poem",      "completion": "Roses are red...", "label": false}
+```
+
+### Process Reward Model (PRM)
+
+For multi-step reasoning tasks, train a PRM to give per-step rewards (`anthos/prm.py`). The PRM value head is a 2-layer MLP on top of frozen Anthos hidden states, trained to predict per-step correctness labels:
+
+```python
+from anthos.prm import PRMTrainer, PRMDataset, PRMConfig, prm_collate
+
+prm = PRMTrainer(base_model, PRMConfig(n_loops=8))
+# Only the value head is trained; base model stays frozen
+prm_optimizer = AdamW(prm.parameters(), lr=1e-4)
+
+dataset = PRMDataset("data/step_labels.jsonl")
+for batch in DataLoader(dataset, collate_fn=prm_collate):
+    loss, m = prm.step(batch); loss.backward(); prm_optimizer.step()
+
+# Use for per-step rewards in GRPO
+scores = prm.score_steps(prompt, ["Step 1...", "Step 2...", "Answer: 4"])
+```
+
+---
+
 ## Reward Training (GRPO)
 
 Anthos supports Group Relative Policy Optimization for RL fine-tuning of the thought stream.  
@@ -320,6 +398,104 @@ step   1000 | loss 3.2841 | aux 0.00421 | prerouter_kl 0.0312 | gnorm 0.847 |
 
 A `⚡ Grad norm spike` warning fires when `gnorm > 3× its running EMA`. Occasional spikes  
 are normal; repeated spikes at the same step usually indicate a bad data batch.
+
+---
+
+## Data Tools
+
+### MinHash Deduplication
+
+Near-duplicate documents inflate benchmark scores and waste compute. Run deduplication before pretraining:
+
+```python
+from anthos.dedup import MinHashDeduplicator
+
+dedup = MinHashDeduplicator(threshold=0.8, n_permutations=128)
+dedup.fit(["data/raw_pretrain.jsonl"])
+dedup.write_deduped("data/raw_pretrain.jsonl", "data/pretrain_deduped.jsonl")
+# Prints: kept 92,400 docs, 7,600 removed (7.6% duplication rate)
+```
+
+Or filter in-memory:
+```python
+clean_texts = dedup.filter_texts(list_of_strings)
+```
+
+---
+
+## Quantization & Export
+
+### Post-Training Quantization
+
+Reduce model size 4× with minimal accuracy loss:
+
+```python
+from anthos.quantize import quantize_model_awq, quantize_model_gptq
+
+# AWQ: fast, no calibration loop needed
+model = quantize_model_awq(model, bits=4, group_size=128)
+torch.save({"model": model.state_dict()}, "checkpoints/anthos-awq-q4.pt")
+
+# GPTQ: more accurate, requires calibration data
+model = quantize_model_gptq(model, loader=calib_loader, bits=4, group_size=128)
+```
+
+### GGUF Export (llama.cpp / Ollama)
+
+Export for CPU inference with llama.cpp, Ollama, or LM Studio:
+
+```bash
+python export_gguf.py \
+    --checkpoint checkpoints/sft/step_000500.pt \
+    --tier sft \
+    --output anthos-sft.gguf \
+    --quant f16
+
+# Then load in llama.cpp:
+./main -m anthos-sft.gguf -p "Hello" -n 128
+```
+
+Available quant types: `f32`, `f16`, `q4_0`, `q4_k_m`, `q8_0`
+
+Note: GGUF export is lossy — the recurrent loop depth is collapsed to 1 and MoE is replaced by the top-1 expert. For full-fidelity inference, use the Python path.
+
+---
+
+## Muon Optimizer
+
+Muon replaces AdamW for 2D weight matrices with a Newton-Schulz orthogonalised update, converging ~20% faster at the same LR:
+
+```python
+from anthos.muon import Muon, split_params_for_muon
+
+muon_params, adam_params = split_params_for_muon(model)
+opt_muon = Muon(muon_params, lr=0.02, momentum=0.95)
+opt_adam = AdamW([{"params": adam_params, "weight_decay": 0.0}], lr=3e-4)
+
+# Each step, call both:
+opt_muon.zero_grad(); opt_adam.zero_grad()
+loss.backward()
+opt_muon.step(); opt_adam.step()
+```
+
+Muon uses a **much higher LR** than AdamW (0.02 vs 3e-4) because orthogonalised updates don't need adaptive scaling.
+
+---
+
+## Context Extension (YaRN RoPE)
+
+Extend inference context beyond the training length without retraining:
+
+```python
+# In anthos/configs.py (or at inference time):
+model_cfg.rope_scaling_type   = "yarn"
+model_cfg.rope_scaling_factor = 8.0   # 4096 → 32768 tokens
+model = Anthos(model_cfg)
+model.load_state_dict(ckpt["model"], strict=False)
+```
+
+The YaRN implementation preserves short-range attention accuracy while
+extending long-range reach. `factor=8.0` extends 4k context to 32k.
 
 ---
 

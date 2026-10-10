@@ -16,6 +16,27 @@ import torch
 import torch.nn.functional as F
 from torch.optim import AdamW
 
+# Optional 8-bit Adam (bitsandbytes) — falls back to regular AdamW if unavailable
+try:
+    import bitsandbytes as bnb
+    _BNB_AVAILABLE = True
+except ImportError:
+    _BNB_AVAILABLE = False
+
+# Optional wandb — falls back gracefully if not installed
+try:
+    import wandb as _wandb_module
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
+# Optional TensorBoard
+try:
+    from torch.utils.tensorboard import SummaryWriter as _TBWriter
+    _TB_AVAILABLE = True
+except ImportError:
+    _TB_AVAILABLE = False
+
 # Allow running from repo root
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -199,6 +220,13 @@ def train(
     max_steps: int | None = None,
     compile_model: bool = False,
     gradient_checkpointing: bool = False,
+    use_8bit_adam: bool = False,
+    use_wandb: bool = False,
+    wandb_project: str = "anthos",
+    use_tb: bool = False,
+    curriculum: bool = False,
+    spike_rollback: bool = False,
+    spike_factor: float = 4.0,
 ):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
@@ -372,11 +400,51 @@ def train(
             print(f"    Goal: validate loss curve shape, ACT stability, MoE routing spread")
         print(f"{'─'*60}\n")
 
-    use_fused = device.startswith("cuda")
+    use_fused    = device.startswith("cuda")
     param_groups = get_param_groups(unwrap_model(model), weight_decay=0.1)
-    optimizer = AdamW(param_groups, lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
+
+    # 8-bit Adam: same API as AdamW, uses block-wise quantisation to cut
+    # optimizer state memory ~75% (from 8 bytes/param to ~2 bytes/param).
+    # Falls back to AdamW when bitsandbytes is not installed.
+    if use_8bit_adam and _BNB_AVAILABLE:
+        optimizer = bnb.optim.AdamW8bit(param_groups, lr=MAX_LR, betas=(0.9, 0.95))
+        if is_main_process():
+            print("  ✓ Using 8-bit AdamW (bitsandbytes) — ~75% optimizer state memory saving")
+    else:
+        if use_8bit_adam and not _BNB_AVAILABLE:
+            if is_main_process():
+                print("  ⚠ --8bit-adam requested but bitsandbytes not installed; using AdamW")
+        optimizer = AdamW(param_groups, lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
+
     n_decay    = sum(p.numel() for p in param_groups[0]["params"])
     n_no_decay = sum(p.numel() for p in param_groups[1]["params"])
+
+    # ── Monitoring: wandb and/or TensorBoard ─────────────────────────────────
+    _wandb_run = None
+    _tb_writer = None
+    if is_main_process():
+        if use_wandb and _WANDB_AVAILABLE:
+            _wandb_run = _wandb_module.init(
+                project = wandb_project,
+                name    = f"{train_cfg.run_name}",
+                config  = {
+                    "tier":       tier,
+                    "max_steps":  MAX_STEPS,
+                    "max_lr":     MAX_LR,
+                    "seq_len":    SEQ_LEN,
+                    "world_size": world_size,
+                    "params":     total_params,
+                },
+            )
+            print(f"  ✓ wandb logging enabled (project={wandb_project})")
+        elif use_wandb:
+            print("  ⚠ --wandb requested but wandb not installed; run: pip install wandb")
+
+        if use_tb and _TB_AVAILABLE:
+            _tb_writer = _TBWriter(log_dir=f"runs/{train_cfg.run_name}")
+            print(f"  ✓ TensorBoard logging enabled → runs/{train_cfg.run_name}")
+        elif use_tb:
+            print("  ⚠ --tb requested but TensorBoard not available")
     if is_main_process():
         print(f"  Optimizer: decay {n_decay:,} params | no-decay {n_no_decay:,} params | wd=0.1")
 
@@ -533,6 +601,19 @@ def train(
     data_iter  = iter(loader)
     data_step  = 0
 
+    # ── Curriculum learning: start with short sequences, ramp up to SEQ_LEN ──
+    # Short sequences in early training help the model learn basic patterns
+    # before seeing long-range dependencies — stabilises loss in the first
+    # ~10% of training and reduces early spikes.
+    _curriculum_target_seq = SEQ_LEN   # final length; stored for ramp computation
+    if curriculum:
+        _curr_start_len = max(64, SEQ_LEN // 8)
+        if is_main_process():
+            print(f"  ✓ Curriculum learning: seq len ramps {_curr_start_len} → {SEQ_LEN} "
+                  f"over first 10% of steps ({MAX_STEPS // 10:,} steps)")
+    else:
+        _curr_start_len = SEQ_LEN
+
     # Resume dataloader position so we never replay the same batches.
     # We skip `resume_data_step` batches by fast-forwarding the iterator.
     resume_data_step = 0
@@ -556,6 +637,8 @@ def train(
     loss_accum        = aux_accum = prerouter_accum = gnorm_accum = 0.0
     avg_loss          = 0.0
     _gnorm_ema        = None   # exponential moving average for spike detection
+    _loss_ema         = None   # EMA for loss spike rollback
+    _last_good_ckpt   = None   # path of last checkpoint before a potential spike
     t0                = time.time()
 
     if is_main_process():
@@ -567,6 +650,15 @@ def train(
         for pg in optimizer.param_groups: pg["lr"] = lr
         n_loops = get_n_loops(step)
 
+        # Curriculum: linearly ramp effective seq len from _curr_start_len → _curriculum_target_seq
+        if curriculum:
+            ramp_steps = max(1, MAX_STEPS // 10)
+            curr_progress = min(1.0, step / ramp_steps)
+            _eff_seq = int(_curr_start_len + curr_progress * (_curriculum_target_seq - _curr_start_len))
+            _eff_seq = max(_curr_start_len, min(_eff_seq, _curriculum_target_seq))
+        else:
+            _eff_seq = SEQ_LEN
+
         optimizer.zero_grad()
         for _ in range(train_cfg.grad_accum):
             try:
@@ -577,18 +669,18 @@ def train(
             data_step += 1
 
             if is_distill:
-                input_ids       = batch[0].to(device)[:, :SEQ_LEN]
-                teacher_logits  = batch[1].to(device)[:, :SEQ_LEN, :]
+                input_ids       = batch[0].to(device)[:, :_eff_seq]
+                teacher_logits  = batch[1].to(device)[:, :_eff_seq, :]
                 labels          = input_ids[:, 1:]
                 input_ids_in    = input_ids[:, :-1]
             elif is_sft:
-                input_ids       = batch[0].to(device)[:, :SEQ_LEN]
-                labels          = batch[1].to(device)[:, :SEQ_LEN]
+                input_ids       = batch[0].to(device)[:, :_eff_seq]
+                labels          = batch[1].to(device)[:, :_eff_seq]
                 input_ids_in    = input_ids
             else:
                 batch        = batch.to(device)
-                input_ids_in = batch[:, :SEQ_LEN-1]
-                labels       = batch[:, 1:SEQ_LEN]
+                input_ids_in = batch[:, :_eff_seq-1]
+                labels       = batch[:, 1:_eff_seq]
 
             _autocast = (
                 torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
@@ -645,6 +737,33 @@ def train(
         optimizer.step()
         step += 1
 
+        # ── Loss spike rollback ───────────────────────────────────────────────
+        # If the current step's CE loss is spike_factor × the running EMA of
+        # loss, restore the last saved checkpoint and continue from there.
+        # This auto-recovers from bad data batches and numerical instabilities.
+        _step_loss = ce.item() if not torch.isnan(ce) else float("inf")
+        if _loss_ema is None:
+            _loss_ema = _step_loss
+        else:
+            _loss_ema = 0.99 * _loss_ema + 0.01 * _step_loss
+        if (
+            spike_rollback
+            and _last_good_ckpt is not None
+            and _step_loss > spike_factor * _loss_ema
+            and _step_loss > 2.0          # ignore tiny absolute values
+            and is_main_process()
+        ):
+            print(
+                f"  ⚠ Loss spike at step {step}: {_step_loss:.4f} > "
+                f"{spike_factor}× ema ({_loss_ema:.4f}) — rolling back to {_last_good_ckpt}",
+                flush=True,
+            )
+            meta = load_checkpoint_distributed(
+                Path(_last_good_ckpt), model, optimizer=optimizer, device=device
+            )
+            step = meta.get("step", step)
+            _loss_ema = None   # reset EMA after rollback
+
         if step % LOG_EVERY == 0 and is_main_process():
             t1            = time.time()
             avg_loss      = loss_accum      / (LOG_EVERY * train_cfg.grad_accum)
@@ -653,14 +772,41 @@ def train(
             avg_gnorm     = gnorm_accum     / LOG_EVERY
             # Scale tok/s by world_size — all GPUs processed batches in parallel
             tok_sec = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum
-                       * SEQ_LEN * world_size) / (t1 - t0)
+                       * _eff_seq * world_size) / (t1 - t0)
             top1_frac = check_moe_collapse(unwrap_model(model), model_cfg, step)
+            _curr_info = f" | seq {_eff_seq}" if curriculum else ""
             print(
                 f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
                 f"prerouter_kl {avg_prerouter:.4f} | gnorm {avg_gnorm:.3f} | "
-                f"moe_top1 {top1_frac:.1%} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s",
+                f"moe_top1 {top1_frac:.1%} | loops {n_loops} | lr {lr:.2e}"
+                f"{_curr_info} | {tok_sec:,.0f} tok/s",
                 flush=True,
             )
+
+            # ── wandb logging ─────────────────────────────────────────────────
+            if _wandb_run is not None:
+                _wandb_run.log({
+                    "loss":          avg_loss,
+                    "aux_loss":      avg_aux,
+                    "prerouter_kl":  avg_prerouter,
+                    "grad_norm":     avg_gnorm,
+                    "moe_top1":      top1_frac,
+                    "lr":            lr,
+                    "n_loops":       n_loops,
+                    "tok_per_sec":   tok_sec,
+                    "seq_len":       _eff_seq,
+                }, step=step)
+
+            # ── TensorBoard logging ───────────────────────────────────────────
+            if _tb_writer is not None:
+                _tb_writer.add_scalar("train/loss",         avg_loss,      step)
+                _tb_writer.add_scalar("train/aux_loss",     avg_aux,       step)
+                _tb_writer.add_scalar("train/prerouter_kl", avg_prerouter, step)
+                _tb_writer.add_scalar("train/grad_norm",    avg_gnorm,     step)
+                _tb_writer.add_scalar("train/moe_top1",     top1_frac,     step)
+                _tb_writer.add_scalar("train/lr",           lr,            step)
+                _tb_writer.add_scalar("train/tok_per_sec",  tok_sec,       step)
+
             loss_accum = aux_accum = prerouter_accum = gnorm_accum = 0.0
             t0 = t1
 
@@ -670,6 +816,7 @@ def train(
                 _ckpt_path, model, optimizer, step, avg_loss, data_step=data_step
             )
             prune_old_checkpoints(ckpt_dir, keep=3)
+            _last_good_ckpt = str(_ckpt_path)   # track for spike rollback
             if is_main_process():
                 try:
                     _tel = _telemetry_harness.record(
@@ -703,6 +850,10 @@ def train(
 
     if is_main_process():
         print(f"\n✓ Sovereign Training complete — {step} steps")
+        if _wandb_run is not None:
+            _wandb_run.finish()
+        if _tb_writer is not None:
+            _tb_writer.close()
     teardown_distributed()
 
 if __name__ == "__main__":
@@ -718,6 +869,20 @@ if __name__ == "__main__":
                         help="torch.compile the model (mode=reduce-overhead). ~20-40%% speedup on A100+")
     parser.add_argument("--grad-checkpoint", action="store_true",
                         help="Activation checkpointing — trades 30%% compute for ~60%% less activation memory")
+    parser.add_argument("--8bit-adam", action="store_true", dest="use_8bit_adam",
+                        help="8-bit AdamW via bitsandbytes — ~75%% optimizer state memory savings")
+    parser.add_argument("--wandb", action="store_true", dest="use_wandb",
+                        help="Log metrics to Weights & Biases (requires: pip install wandb)")
+    parser.add_argument("--wandb-project", type=str, default="anthos",
+                        help="W&B project name (default: anthos)")
+    parser.add_argument("--tb", action="store_true", dest="use_tb",
+                        help="Log metrics to TensorBoard (runs/<run_name>/)")
+    parser.add_argument("--curriculum", action="store_true",
+                        help="Curriculum learning: ramp seq len from SEQ_LEN/8 → SEQ_LEN over first 10%% of steps")
+    parser.add_argument("--spike-rollback", action="store_true", dest="spike_rollback",
+                        help="Auto-rollback to last checkpoint when loss spikes > spike-factor × EMA")
+    parser.add_argument("--spike-factor", type=float, default=4.0,
+                        help="Loss spike threshold multiplier (default: 4.0)")
     args = parser.parse_args()
     train(
         tier                    = args.tier,
@@ -726,4 +891,11 @@ if __name__ == "__main__":
         max_steps               = args.steps,
         compile_model           = args.compile,
         gradient_checkpointing  = args.grad_checkpoint,
+        use_8bit_adam           = args.use_8bit_adam,
+        use_wandb               = args.use_wandb,
+        wandb_project           = args.wandb_project,
+        use_tb                  = args.use_tb,
+        curriculum              = args.curriculum,
+        spike_rollback          = args.spike_rollback,
+        spike_factor            = args.spike_factor,
     )
