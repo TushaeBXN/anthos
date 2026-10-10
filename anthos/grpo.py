@@ -302,6 +302,119 @@ def get_soft_overlong_punishment(max_completion_len: int, buffer: int = 20):
     return soft_overlong_punishment_reward
 
 
+def get_format_reward(pattern: str):
+    """
+    Factory: binary reward for completions that match a required output format.
+
+    Returns 1.0 when the completion matches the regex, 0.0 otherwise.
+    Useful for teaching Anthos to emit structured responses (reasoning traces,
+    JSON, tool calls, etc.) — use early in GRPO training while the model is
+    still learning format, then phase it out once format is stable.
+
+    The default pattern enforces open-r1-style chain-of-thought:
+        <think>
+        ...reasoning...
+        </think>
+        <answer>
+        ...answer...
+        </answer>
+
+    Since Anthos's thought tokens are architectural (internal, leave no trace),
+    this reward is optional — use it only if you want the *sequence stream*
+    to also emit an explicit reasoning trace in its output text.
+
+    Args:
+        pattern: regex pattern the full decoded completion must match
+
+    Usage:
+        # Chain-of-thought output format
+        fmt = get_format_reward(
+            pattern=r"^<think>\\n.*?\\n</think>\\n<answer>\\n.*?\\n</answer>$"
+        )
+
+        # JSON output
+        fmt = get_format_reward(pattern=r'^\\{.*\\}$')
+
+        rewards = fmt(prompts, completions, tokenizer)
+    """
+    import re
+    compiled = re.compile(pattern, re.DOTALL | re.MULTILINE)
+
+    def format_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for completion in completions:
+            ids  = completion.tolist()
+            text = tokenizer.decode(ids, skip_special_tokens=True)
+            rewards.append(1.0 if compiled.match(text) else 0.0)
+        return rewards
+
+    return format_reward
+
+
+def get_tag_count_reward(tags: Optional[list] = None):
+    """
+    Factory: partial-credit reward for tag structure.
+
+    Returns a score in [0.0, 1.0] based on how many required tags are
+    present and correctly formed — 0.25 per tag when there are 4 tags,
+    scaled to 1.0 / len(tags) per tag in general.
+
+    Gives gradient signal even when the model hasn't learned the full
+    format yet — it gets credit for each tag it produces correctly.
+    Use in the early phase of format training alongside get_format_reward;
+    once format_reward is consistently 1.0, drop this one.
+
+    Args:
+        tags: list of (substring, expected_count) pairs.
+              Default is the open-r1 chain-of-thought set:
+              [("<think>\\n", 1), ("\\n</think>\\n", 1),
+               ("\\n<answer>\\n", 1), ("\\n</answer>", 1)]
+
+    Usage:
+        # Default CoT tags
+        tag_rw = get_tag_count_reward()
+
+        # Custom tags — e.g. tool-call format
+        tag_rw = get_tag_count_reward([
+            ("<tool_call>\\n", 1),
+            ("\\n</tool_call>", 1),
+        ])
+
+        rewards = tag_rw(prompts, completions, tokenizer)
+    """
+    if tags is None:
+        tags = [
+            ("<think>\n",   1),
+            ("\n</think>\n", 1),
+            ("\n<answer>\n", 1),
+            ("\n</answer>",  1),
+        ]
+
+    per_tag_score = 1.0 / len(tags)
+
+    def tag_count_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for completion in completions:
+            ids  = completion.tolist()
+            text = tokenizer.decode(ids, skip_special_tokens=True)
+            score = 0.0
+            for substring, expected_count in tags:
+                if text.count(substring) == expected_count:
+                    score += per_tag_score
+            rewards.append(float(score))
+        return rewards
+
+    return tag_count_reward
+
+
 def loop_efficiency_reward(
     loops_used:  torch.Tensor,   # (B, T) from ACT
     max_loops:   int,
