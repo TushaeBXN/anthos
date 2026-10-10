@@ -48,18 +48,27 @@ Usage:
 
     for batch in loader:
         loss = trainer.step(batch["input_ids"])
+        optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         optimizer.step()
 
 Hardware note:
   GRPO requires generating K completions per prompt — this is GPU-heavy.
   Run on RunPod (H100 or better) after your hardware upgrade, not on MPS.
   The code runs on MPS for testing but will be slow for real training.
+
+Reward function return values:
+  A reward function may return None for a completion to skip it entirely
+  (e.g. when ground truth is unparseable). Skipped completions are excluded
+  from advantage normalisation and the policy gradient loss — they do not
+  contribute zero reward, they contribute nothing.
 """
 
 from __future__ import annotations
 
 import copy
+import math
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
@@ -95,33 +104,138 @@ def quality_reward(
     prompts:     List[torch.Tensor],   # list of (T_p,) prompt token tensors
     completions: List[torch.Tensor],   # list of (T_c,) completion tensors
     tokenizer,
-) -> List[float]:
+    ngram_size:  int = 3,
+) -> List[Optional[float]]:
     """
-    Simple quality reward based on:
-      - Length reasonableness (penalise very short or repetitive completions)
-      - Vocabulary diversity (penalise degenerate loops)
-      - No EOS in the middle (penalise premature stopping)
+    Quality reward based on:
+      - Vocabulary diversity (unique tokens / total tokens)
+      - N-gram repetition penalty (fraction of repeated n-grams)
+      - Returns None for degenerate completions (too short to score)
 
+    Reward functions may return None to skip a completion entirely —
+    it will be excluded from the advantage computation and policy loss.
     Replace or extend this with a trained reward model for stronger signal.
     """
     rewards = []
-    for prompt, completion in zip(prompts, completions):
+    for completion in completions:
         ids = completion.tolist()
-        if len(ids) < 5:
-            rewards.append(-1.0)
+        if len(ids) < ngram_size + 1:
+            rewards.append(None)   # too short to score meaningfully
             continue
 
         # Vocabulary diversity: unique tokens / total tokens
         diversity = len(set(ids)) / len(ids)
 
-        # Repetition penalty: count n-gram repeats
-        ngrams = [tuple(ids[i:i+3]) for i in range(len(ids) - 2)]
-        repeat_rate = 1.0 - len(set(ngrams)) / max(len(ngrams), 1)
+        # N-gram repetition penalty
+        ngrams = [tuple(ids[i:i + ngram_size]) for i in range(len(ids) - ngram_size)]
+        repeat_rate = 1.0 - len(set(ngrams)) / len(ngrams)
 
-        reward = diversity - 0.5 * repeat_rate
-        rewards.append(float(reward))
+        rewards.append(float(diversity - 0.5 * repeat_rate))
 
     return rewards
+
+
+def get_repetition_penalty_reward(ngram_size: int = 3, max_penalty: float = -1.0):
+    """
+    Factory: configurable n-gram repetition penalty reward.
+
+    Returns a scalar in [max_penalty, 0]: 0 when no repeats, max_penalty
+    when every n-gram is repeated. Combine with quality_reward or use
+    standalone as an additive penalty on top of another reward.
+
+    Args:
+        ngram_size:  n-gram window (default 3)
+        max_penalty: most negative reward (must be <= 0)
+
+    Usage:
+        rep_penalty = get_repetition_penalty_reward(ngram_size=4, max_penalty=-0.5)
+        rewards = rep_penalty(prompts, completions, tokenizer)
+    """
+    if max_penalty > 0:
+        raise ValueError(f"max_penalty {max_penalty} must be <= 0")
+
+    def repetition_penalty_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+    ) -> List[Optional[float]]:
+        rewards = []
+        for completion in completions:
+            ids = completion.tolist()
+            if len(ids) < ngram_size + 1:
+                rewards.append(None)
+                continue
+            ngrams = [tuple(ids[i:i + ngram_size]) for i in range(len(ids) - ngram_size)]
+            unique_ratio = len(set(ngrams)) / len(ngrams)
+            # scaling = fraction of repeated n-grams; 0 = no repeats
+            scaling = 1.0 - unique_ratio
+            rewards.append(float(scaling * max_penalty))
+        return rewards
+
+    return repetition_penalty_reward
+
+
+def get_cosine_length_reward(
+    min_value_wrong:   float = -1.0,
+    max_value_wrong:   float = -0.5,
+    min_value_correct: float =  0.5,
+    max_value_correct: float =  1.0,
+    max_len:           int   = 512,
+):
+    """
+    Factory: cosine-scaled length reward.
+
+    Shorter correct completions get higher reward; longer ones get less.
+    Longer incorrect completions are penalised less than shorter ones
+    (the model shouldn't give up early just to avoid penalty).
+
+    Requires a correctness signal — pass a `is_correct` kwarg list to the
+    returned function, or subclass and override. When is_correct is not
+    supplied, all completions are treated as correct (pure length incentive).
+
+    Args:
+        min_value_wrong:   floor reward for incorrect completions
+        max_value_wrong:   ceiling reward for incorrect completions
+        min_value_correct: floor reward for correct completions
+        max_value_correct: ceiling reward for correct completions
+        max_len:           token length at which cosine reaches its minimum
+
+    Usage:
+        cosine_rw = get_cosine_length_reward(max_len=256)
+        rewards   = cosine_rw(prompts, completions, tokenizer,
+                              is_correct=[True, False, True, ...])
+    """
+    def cosine_length_reward(
+        prompts:     List[torch.Tensor],
+        completions: List[torch.Tensor],
+        tokenizer,
+        is_correct:  Optional[List[Optional[bool]]] = None,
+    ) -> List[Optional[float]]:
+        if is_correct is None:
+            is_correct = [True] * len(completions)
+
+        rewards = []
+        for completion, correct in zip(completions, is_correct):
+            if correct is None:
+                rewards.append(None)
+                continue
+
+            gen_len  = len(completion.tolist())
+            progress = min(gen_len / max_len, 1.0)
+            cosine   = math.cos(progress * math.pi)
+
+            if correct:
+                min_v, max_v = min_value_correct, max_value_correct
+            else:
+                # Swap so longer wrong answers are penalised less
+                min_v, max_v = max_value_wrong, min_value_wrong
+
+            reward = min_v + 0.5 * (max_v - min_v) * (1.0 + cosine)
+            rewards.append(float(reward))
+
+        return rewards
+
+    return cosine_length_reward
 
 
 def loop_efficiency_reward(
@@ -130,15 +244,13 @@ def loop_efficiency_reward(
 ) -> torch.Tensor:
     """
     Reward efficient use of compute — fewer loops for the same quality.
-    Returns per-sequence scalar reward.
+    Returns per-sequence scalar reward in [0, 1].
 
     This pairs with quality_reward: quality ensures the model doesn't just
     halt at loop 1 to minimise compute; loop efficiency ensures it doesn't
     run all 16 loops when 4 would do.
     """
-    # Mean loops used per token, normalised to [0, 1]
     mean_loops = loops_used.float().mean(dim=-1) / max_loops   # (B,)
-    # Reward = 1 - mean_loops (fewer loops = higher reward)
     return (1.0 - mean_loops).clamp(0.0, 1.0)
 
 
@@ -151,13 +263,14 @@ def _get_log_probs(
     input_ids:    torch.Tensor,   # (B, T)
     labels:       torch.Tensor,   # (B, T) — which tokens to score
     n_loops:      int,
-    kv_cache:     Optional[dict] = None,
+    requires_grad: bool = False,
 ) -> torch.Tensor:
     """
     Get per-token log probabilities for the label tokens.
-    Returns (B, T) tensor — -inf at non-label positions.
+    Returns (B, T-1) tensor — zeroed at non-label positions.
     """
-    with torch.no_grad() if not model.training else torch.enable_grad():
+    ctx = torch.enable_grad() if requires_grad else torch.no_grad()
+    with ctx:
         logits = model(input_ids, n_loops=n_loops)   # (B, T, V)
 
     # Shift: predict token t+1 from position t
@@ -166,12 +279,11 @@ def _get_log_probs(
 
     log_probs = F.log_softmax(shift_logits, dim=-1)  # (B, T-1, V)
 
-    # Gather log prob of each label token
     gathered = log_probs.gather(
         -1, shift_labels.unsqueeze(-1).clamp(min=0)
     ).squeeze(-1)                                    # (B, T-1)
 
-    # Zero out positions that are padding (-100)
+    # Zero out padding positions (-100)
     mask     = (shift_labels >= 0).float()
     gathered = gathered * mask
 
@@ -187,8 +299,9 @@ class GRPOTrainer:
     GRPO trainer for Anthos.
 
     Manages:
-      - K-completion generation per prompt
+      - K-completion generation per prompt (batched)
       - Reward computation and group normalisation
+      - None-skip: completions the reward function marks None are excluded
       - Policy gradient loss with KL regularisation
       - Loop efficiency reward integration
 
@@ -196,6 +309,8 @@ class GRPOTrainer:
         trainer = GRPOTrainer(model, ref_model, tokenizer, config, reward_fn)
         for batch in dataloader:
             loss = trainer.step(batch["input_ids"])
+            if loss is None:
+                continue   # all completions were skipped
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -225,108 +340,140 @@ class GRPOTrainer:
         self,
         prompt_ids: torch.Tensor,   # (1, T_p) — single prompt
     ) -> torch.Tensor:
-        """Generate K completions for a single prompt. Returns (K, T_p+T_c)."""
+        """
+        Generate K completions for a single prompt.
+
+        The prompt is expanded to a batch of K and generated in one forward
+        pass, which is significantly faster than K separate generate() calls.
+        Falls back to sequential generation if the model's generate() does
+        not support batch size > 1.
+
+        Returns (K, T_p+T_c).
+        """
+        K = self.cfg.n_completions
         self.model.eval()
-        completions = []
+
         with torch.no_grad():
-            for _ in range(self.cfg.n_completions):
+            # Expand to batch of K: (K, T_p)
+            prompt_batch = prompt_ids.expand(K, -1)
+            try:
                 out = self.model.generate(
-                    prompt_ids,
+                    prompt_batch,
                     max_new_tokens = self.cfg.max_new_tokens,
                     n_loops        = self.cfg.n_loops_train,
                     temperature    = self.cfg.temperature,
                     top_k          = self.cfg.top_k,
-                )
-                completions.append(out)
+                )   # (K, T_p + T_c)
+            except (RuntimeError, NotImplementedError):
+                # Sequential fallback if batched generation is unsupported
+                completions = []
+                for _ in range(K):
+                    c = self.model.generate(
+                        prompt_ids,
+                        max_new_tokens = self.cfg.max_new_tokens,
+                        n_loops        = self.cfg.n_loops_train,
+                        temperature    = self.cfg.temperature,
+                        top_k          = self.cfg.top_k,
+                    )
+                    completions.append(c)
+
+                max_len = max(c.shape[1] for c in completions)
+                pad_id  = self.tokenizer.pad_token_id or 0
+                out = torch.cat([
+                    F.pad(c, (0, max_len - c.shape[1]), value=pad_id)
+                    for c in completions
+                ], dim=0)
+
         self.model.train()
-
-        # Pad to same length
-        max_len = max(c.shape[1] for c in completions)
-        pad_id  = self.tokenizer.pad_token_id or 0
-        padded  = []
-        for c in completions:
-            pad = max_len - c.shape[1]
-            padded.append(F.pad(c, (0, pad), value=pad_id))
-
-        return torch.cat(padded, dim=0)   # (K, T_total)
+        return out   # (K, T_total)
 
     def _compute_advantages(self, rewards: List[float]) -> torch.Tensor:
         """
         Group-relative advantage normalisation.
         A_i = (r_i - mean(r)) / (std(r) + eps)
         Clipped to [-clip_adv, +clip_adv].
+
+        Returns zero advantages when all rewards are identical (std == 0),
+        rather than dividing by near-zero and amplifying noise.
         """
         r = torch.tensor(rewards, dtype=torch.float32)
         if self.cfg.normalize_reward and len(r) > 1:
-            r = (r - r.mean()) / (r.std() + 1e-8)
+            std = r.std()
+            if std < 1e-6:
+                # All rewards identical — no useful signal, return zeros
+                return torch.zeros_like(r)
+            r = (r - r.mean()) / (std + 1e-8)
         return r.clamp(-self.cfg.clip_advantages, self.cfg.clip_advantages)
 
     def step(
         self,
-        prompt_ids:  torch.Tensor,           # (1, T_p)
-        extra_rewards: Optional[List[float]] = None,   # optional extra signals
-    ) -> torch.Tensor:
+        prompt_ids:    torch.Tensor,              # (1, T_p)
+        extra_rewards: Optional[List[float]] = None,
+    ) -> Optional[torch.Tensor]:
         """
         Run one GRPO step for a single prompt.
 
         Returns:
-            loss: scalar tensor (differentiable)
+            loss: scalar tensor (differentiable), or None if all completions
+                  were skipped by the reward function.
         """
         device = prompt_ids.device
         T_p    = prompt_ids.shape[1]
 
-        # ── 1. Generate K completions ──────────────────────────────────────
-        completions = self._generate_completions(prompt_ids)  # (K, T_total)
+        # ── 1. Generate K completions (batched) ───────────────────────────
+        completions = self._generate_completions(prompt_ids)   # (K, T_total)
         K           = completions.shape[0]
 
-        # Extract completion-only parts
         completion_parts = [completions[i, T_p:] for i in range(K)]
         prompt_parts     = [prompt_ids[0]] * K
 
         # ── 2. Compute rewards ─────────────────────────────────────────────
-        rewards = self.reward_fn(
-            prompt_parts,
-            completion_parts,
-            self.tokenizer,
-        )
+        raw_rewards = self.reward_fn(prompt_parts, completion_parts, self.tokenizer)
 
         if extra_rewards is not None:
-            rewards = [r + e for r, e in zip(rewards, extra_rewards)]
+            raw_rewards = [
+                None if r is None else r + e
+                for r, e in zip(raw_rewards, extra_rewards)
+            ]
 
-        advantages = self._compute_advantages(rewards).to(device)  # (K,)
+        # Filter out None-skipped completions
+        valid_mask = [r is not None for r in raw_rewards]
+        if not any(valid_mask):
+            return None   # all completions skipped — no loss to compute
+
+        valid_idx     = [i for i, v in enumerate(valid_mask) if v]
+        valid_rewards = [raw_rewards[i] for i in valid_idx]
+        valid_comps   = completions[valid_idx]   # (V, T_total)
+
+        advantages = self._compute_advantages(valid_rewards).to(device)   # (V,)
 
         # ── 3. Policy log probs ────────────────────────────────────────────
-        # Labels: only the completion tokens contribute to the loss
-        labels = completions.clone()
-        labels[:, :T_p] = -100   # mask out prompt positions
+        labels = valid_comps.clone()
+        labels[:, :T_p] = -100
 
         policy_log_probs = _get_log_probs(
-            self.model, completions, labels, self.cfg.n_loops_train
-        )   # (K, T_total-1)
+            self.model, valid_comps, labels,
+            self.cfg.n_loops_train, requires_grad=True,
+        )   # (V, T_total-1)
 
         # ── 4. Reference KL ───────────────────────────────────────────────
-        with torch.no_grad():
-            ref_log_probs = _get_log_probs(
-                self.ref_model, completions, labels, self.cfg.n_loops_ref
-            )   # (K, T_total-1)
+        ref_log_probs = _get_log_probs(
+            self.ref_model, valid_comps, labels,
+            self.cfg.n_loops_ref, requires_grad=False,
+        )   # (V, T_total-1)
 
-        kl = (policy_log_probs - ref_log_probs).mean(dim=-1)   # (K,)
+        kl = (policy_log_probs - ref_log_probs).mean(dim=-1)   # (V,)
 
         # ── 5. Policy gradient loss ────────────────────────────────────────
-        # Sequence log prob = sum of token log probs (normalised by length)
-        seq_len = (labels[:, 1:] >= 0).float().sum(dim=-1).clamp(min=1)
-        seq_log_prob = policy_log_probs.sum(dim=-1) / seq_len   # (K,)
+        seq_len      = (labels[:, 1:] >= 0).float().sum(dim=-1).clamp(min=1)
+        seq_log_prob = policy_log_probs.sum(dim=-1) / seq_len   # (V,)
 
         pg_loss  = -(advantages * seq_log_prob).mean()
         kl_loss  = self.cfg.kl_coef * kl.mean()
-
-        # Entropy bonus: encourage exploration
         entropy  = -policy_log_probs.mean()
         ent_loss = -self.cfg.entropy_bonus * entropy
 
-        total_loss = pg_loss + kl_loss + ent_loss
-
-        return total_loss
+        return pg_loss + kl_loss + ent_loss
 
     @classmethod
     def from_pretrained(
@@ -353,7 +500,7 @@ class GRPOTrainer:
                 grpo_config     = GRPOConfig(),
             )
         """
-        ckpt  = torch.load(checkpoint_path, map_location=device)
+        ckpt  = torch.load(checkpoint_path, map_location=device, weights_only=True)
         model = model_class(cfg).to(device)
         model.load_state_dict(ckpt["model"], strict=False)
 
