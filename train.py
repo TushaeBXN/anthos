@@ -192,7 +192,14 @@ def get_param_groups(model: Anthos, weight_decay: float = 0.1) -> list[dict]:
 # Main Training Loop
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | None = None, max_steps: int | None = None):
+def train(
+    tier: str = "proof",
+    resume: str | None = None,
+    teacher_labels: str | None = None,
+    max_steps: int | None = None,
+    compile_model: bool = False,
+    gradient_checkpointing: bool = False,
+):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
     # ── Distributed setup ─────────────────────────────────────────────────────
@@ -269,8 +276,39 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     if max_steps is not None:
         MAX_STEPS = max_steps
 
+    if gradient_checkpointing:
+        model_cfg.gradient_checkpointing = True
+
+    # ── Flash Attention 2 backend selection ──────────────────────────────────
+    # F.scaled_dot_product_attention (already used in GQAttention/MLAttention)
+    # dispatches to Flash Attention 2 when running on CUDA with bf16/fp16.
+    # Explicitly prefer the Flash kernel over mem-efficient; fall back to math
+    # on CPU / older GPUs that don't support FA2.
+    if device.startswith("cuda"):
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+            torch.backends.cuda.enable_mem_efficient_sdp(False)
+            torch.backends.cuda.enable_math_sdp(False)   # disable slow fallback
+        except Exception:
+            pass   # older PyTorch version — SDPA still works, just no explicit hint
+
     model = Anthos(model_cfg).to(device)
     total_params = sum(p.numel() for p in model.parameters())
+
+    # ── torch.compile ─────────────────────────────────────────────────────────
+    # Compile BEFORE DDP so DDP sees the already-compiled module.
+    # mode="reduce-overhead": fuses small ops, reduces Python interpreter
+    # overhead — best for models with many small kernels (MoE, ACT).
+    # Skipped if --no-compile or PyTorch < 2.0.
+    if compile_model:
+        try:
+            model = torch.compile(model, mode="reduce-overhead", dynamic=True)
+            if is_main_process():
+                print("  ✓ torch.compile enabled (mode=reduce-overhead, dynamic=True)")
+        except Exception as e:
+            if is_main_process():
+                print(f"  ⚠ torch.compile skipped: {e}")
+
     if is_distributed:
         model = wrap_ddp(model, local_rank)
 
@@ -316,6 +354,8 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
         print(f"  Tier:       {tier}")
         print(f"  Parameters: {total_params:,}")
         print(f"  GPUs:       {world_size} ({'DDP' if is_distributed else 'single'})")
+        print(f"  Compile:    {'yes (reduce-overhead)' if compile_model else 'no'}")
+        print(f"  Grad ckpt:  {'yes (~60% activation memory saved)' if gradient_checkpointing else 'no'}")
         print(f"  Max Steps:  {MAX_STEPS:,} | Warmup: {WARMUP_STEPS}")
         print(f"  Max LR:     {MAX_LR} | Loops: {PHASE1_LOOPS}->{PHASE2_LOOPS}")
         print(f"  Stage tag:  {_stage_tag}")
@@ -674,5 +714,16 @@ if __name__ == "__main__":
                         help="Override MAX_STEPS for this run (e.g. --steps 150000)")
     parser.add_argument("--teacher_labels", type=str, default=None,
                         help="Path to teacher soft-label JSONL (required for --tier distill)")
+    parser.add_argument("--compile", action="store_true",
+                        help="torch.compile the model (mode=reduce-overhead). ~20-40%% speedup on A100+")
+    parser.add_argument("--grad-checkpoint", action="store_true",
+                        help="Activation checkpointing — trades 30%% compute for ~60%% less activation memory")
     args = parser.parse_args()
-    train(tier=args.tier, resume=args.resume, teacher_labels=args.teacher_labels, max_steps=args.steps)
+    train(
+        tier                    = args.tier,
+        resume                  = args.resume,
+        teacher_labels          = args.teacher_labels,
+        max_steps               = args.steps,
+        compile_model           = args.compile,
+        gradient_checkpointing  = args.grad_checkpoint,
+    )

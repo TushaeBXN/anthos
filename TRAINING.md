@@ -48,6 +48,29 @@ Override step count for any tier:
 python train.py --tier proof --steps 50000
 ```
 
+### Performance flags
+
+```bash
+# torch.compile — fuses kernels, ~20-40% throughput gain on A100+
+# First step is slow (compile time ~2 min); subsequent steps are faster
+python train.py --tier proof --compile
+
+# Activation checkpointing — recomputes activations during backward
+# ~60% less activation memory, ~30% more compute — enables larger batches
+python train.py --tier proof --grad-checkpoint
+
+# Combine both for maximum throughput at minimum memory
+torchrun --nproc_per_node=4 train.py --tier sft \
+         --resume checkpoints/proof/step_010000.pt \
+         --compile --grad-checkpoint
+```
+
+| Flag | Memory impact | Speed impact | When to use |
+|------|--------------|-------------|-------------|
+| `--compile` | none | +20-40% | Always on A100+, skip on CPU |
+| `--grad-checkpoint` | -60% activations | -30% | When OOM on large batches |
+| Both | -60% activations | net ~0-10% gain | Large models / long sequences |
+
 ---
 
 ## Model Scales

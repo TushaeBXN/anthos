@@ -139,6 +139,13 @@ class AnthosConfig:
     # OLMo-core uses 1e-4; safe to raise to 1e-3 if logits drift above ±30.
     zloss_coef:            float = 1e-4
 
+    # Activation checkpointing: recompute TransformerBlock activations during
+    # backward instead of storing them, trading ~30% extra compute for ~60%
+    # less activation memory per recurrent loop iteration.
+    # Safe to enable whenever kv_cache is not used (i.e. all training).
+    # Disable for inference (kv_cache path skips checkpointing automatically).
+    gradient_checkpointing: bool = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalization
@@ -799,9 +806,20 @@ class AnthosRecurrentBlock(nn.Module):
             full_seq       = torch.cat([thoughts, h_combined], dim=1)
             combined_freqs = _anthos_rope_freqs(freqs_cis, thought_freqs_0, self.n_thought, T)
 
-            cache_key         = f"anthos_loop_{t}"
-            full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, self.n_thought)
-            full_out          = full_out + self.lora(full_out, t)
+            cache_key = f"anthos_loop_{t}"
+            if self.cfg.gradient_checkpointing and kv_cache is None:
+                # Recompute activations during backward — saves ~60% activation
+                # memory per loop iteration at the cost of one extra forward pass.
+                # use_reentrant=False: modern path, compatible with torch.compile.
+                from torch.utils.checkpoint import checkpoint as _ckpt
+                full_out, moe_aux = _ckpt(
+                    self.block, full_seq, combined_freqs, combined_mask,
+                    None, cache_key, self.n_thought,
+                    use_reentrant=False,
+                )
+            else:
+                full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, self.n_thought)
+            full_out = full_out + self.lora(full_out, t)
             moe_aux_total     = moe_aux_total + moe_aux
 
             thought_out = full_out[:, :self.n_thought, :]
