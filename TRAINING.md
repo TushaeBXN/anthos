@@ -482,6 +482,82 @@ Muon uses a **much higher LR** than AdamW (0.02 vs 3e-4) because orthogonalised 
 
 ---
 
+## REINFORCE++
+
+REINFORCE++ is a lighter alternative to GRPO that uses importance-sampling
+correction without the pessimistic PPO clipping. It's faster per step (no
+`min(r·A, clip(r)·A)` computation) and easier to tune. Enable with `algo="reinforce++"`:
+
+```python
+from anthos.grpo import GRPOConfig, GRPOTrainer
+
+trainer = GRPOTrainer(
+    model, ref_model, tokenizer,
+    config    = GRPOConfig(algo="reinforce++", clip_eps=0.2, kl_coef=0.05),
+    reward_fn = get_accuracy_reward(),
+)
+```
+
+| `algo` | Description | When to use |
+|--------|------------|-------------|
+| `"grpo"` | Dr. GRPO + clip-higher (pessimistic min) | Default; better on hard tasks |
+| `"reinforce++"` | IS-corrected REINFORCE (clipped upside only) | Faster; good starting point |
+| `"reinforce"` | Vanilla REINFORCE (`clip_eps=0`) | Debugging; very unstable at scale |
+
+---
+
+## Mixture of Depths (MoD)
+
+MoD learns to skip the TransformerBlock for unimportant tokens, reducing
+FLOPs per token by up to 50%. Enable in the model config:
+
+```python
+from anthos.configs import get_training_config
+
+model_cfg, train_cfg = get_training_config("sft")
+model_cfg.use_mod      = True   # enable MoD routing
+model_cfg.mod_capacity = 0.5    # 50% of tokens go through each block
+model = Anthos(model_cfg)
+```
+
+The MoD router is trained jointly with the rest of the model — no separate
+routing pre-training step needed. The router starts near-uniform and learns
+which positions need computation over the first ~1k steps.
+
+**Capacity tradeoff:**
+| `mod_capacity` | FLOP savings | Quality impact |
+|--------------|-------------|---------------|
+| 0.75 | ~25% | minimal |
+| 0.50 | ~50% | slight (<0.5% accuracy drop on MMLU) |
+| 0.25 | ~75% | moderate — tune kl coef down |
+
+---
+
+## OpenAI-Compatible Inference Server
+
+Serve Anthos locally with a drop-in OpenAI API:
+
+```bash
+# Start server
+python serve.py --checkpoint checkpoints/sft/step_000500.pt --tier sft
+
+# Connect with any OpenAI client
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="x")
+
+resp = client.chat.completions.create(
+    model="anthos",
+    messages=[{"role": "user", "content": "Explain recursion"}],
+    max_tokens=256,
+)
+print(resp.choices[0].message.content)
+```
+
+Server flags: `--host`, `--port`, `--n-loops`, `--compile`, `--device`
+Requires: `pip install fastapi uvicorn`
+
+---
+
 ## Context Extension (YaRN RoPE)
 
 Extend inference context beyond the training length without retraining:

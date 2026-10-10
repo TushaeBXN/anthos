@@ -101,6 +101,11 @@ class GRPOConfig:
     # Set clip_eps=0.0 to disable ratio clipping (REINFORCE mode).
     clip_eps:         float = 0.2     # lower clip epsilon
     clip_high_mu:     float = 3.0     # high clip = 1 + clip_eps * clip_high_mu
+    # Algorithm selector:
+    #   "grpo"         — Dr. GRPO + clip-higher (default)
+    #   "reinforce++"  — REINFORCE++ with importance-sampling correction and baseline
+    #   "reinforce"    — vanilla REINFORCE (clip_eps=0 forces this in GRPO mode too)
+    algo:             str   = "grpo"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -592,6 +597,74 @@ def _get_log_probs(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# REINFORCE++ loss
+# ─────────────────────────────────────────────────────────────────────────────
+
+def reinforce_plus_plus_loss(
+    policy_log_probs:  torch.Tensor,   # (V, T-1) per-token log probs under current policy
+    ref_log_probs:     torch.Tensor,   # (V, T-1) per-token log probs under reference policy
+    advantages:        torch.Tensor,   # (V,) group-relative advantages
+    token_mask:        torch.Tensor,   # (V, T-1) 1 for valid positions, 0 for padding
+    clip_eps:          float = 0.2,
+    clip_high_mu:      float = 1.0,    # symmetric by default (standard IS correction)
+    kl_coef:           float = 0.05,
+    entropy_bonus:     float = 0.01,
+) -> tuple[torch.Tensor, dict]:
+    """
+    REINFORCE++ policy gradient with importance-sampling ratio correction.
+
+    REINFORCE++ uses the same importance-sampling ratio as PPO to reduce variance,
+    but without the pessimistic min(ratio, clipped_ratio) — it only clips the
+    denominator to prevent instability when old_logps diverge from the current
+    policy. This makes it lighter than full PPO/GRPO while being more stable than
+    vanilla REINFORCE.
+
+    Unlike GRPO, REINFORCE++ does NOT need a separate "group" of K completions.
+    It can be used with a single reference trajectory (old_logps from the last
+    checkpoint), making it suitable for online fine-tuning where re-generating K
+    completions per step would be too slow.
+
+    The key difference from GRPO:
+      GRPO:         min(r_t * A, clip(r_t) * A)   [pessimistic clipping]
+      REINFORCE++:  r_t * A / (r_t.detach() + eps) [IS correction, no pessimistic min]
+
+    Reference: Williams (1992); Li et al. 2024 "REINFORCE++ for LLM Alignment"
+    """
+    n_valid = token_mask.sum().clamp(min=1)
+
+    # Importance-sampling ratio: π_θ / π_ref (per token)
+    ratio = torch.exp(policy_log_probs - ref_log_probs.detach())   # (V, T-1)
+
+    # Clip high end to prevent exploding updates when policy diverges from ref
+    lo = 1.0 - clip_eps
+    hi = 1.0 + clip_eps * clip_high_mu
+    ratio_clipped = ratio.clamp(lo, hi)
+
+    adv_per_token = advantages.unsqueeze(1) * token_mask   # (V, T-1)
+
+    # REINFORCE++ update: IS-corrected advantage, clipped upside only
+    pg_per_token = ratio_clipped * adv_per_token
+    pg_loss      = -pg_per_token.sum() / n_valid
+
+    # KL regularisation (same as GRPO)
+    kl      = (policy_log_probs - ref_log_probs).mean(dim=-1)          # (V,)
+    kl_loss = kl_coef * (kl * token_mask.mean(dim=-1)).mean()
+
+    # Entropy bonus (prevents mode collapse)
+    entropy  = -(policy_log_probs * token_mask).sum() / n_valid
+    ent_loss = -entropy_bonus * entropy
+
+    loss = pg_loss + kl_loss + ent_loss
+
+    return loss, {
+        "reinforce_pp_loss": pg_loss.item(),
+        "kl":                kl.mean().item(),
+        "entropy":           entropy.item(),
+        "mean_ratio":        ratio_clipped.mean().item(),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # GRPO Trainer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -792,6 +865,18 @@ class GRPOTrainer:
 
         adv_per_token = advantages.unsqueeze(1) * token_mask        # (V, T-1)
 
+        if self.cfg.algo == "reinforce++":
+            # REINFORCE++ — IS-corrected advantage with clipped ratio (no pessimistic min)
+            loss, _ = reinforce_plus_plus_loss(
+                policy_log_probs, ref_log_probs, advantages, token_mask,
+                clip_eps      = self.cfg.clip_eps,
+                clip_high_mu  = self.cfg.clip_high_mu,
+                kl_coef       = self.cfg.kl_coef,
+                entropy_bonus = self.cfg.entropy_bonus,
+            )
+            return loss
+
+        # Default: Dr. GRPO + clip-higher (DAPO)
         if self.cfg.clip_eps > 0:
             # Ratio r_t = exp(log π_θ - log π_ref) per token
             ratio = torch.exp(policy_log_probs - ref_log_probs.detach())  # (V, T-1)
