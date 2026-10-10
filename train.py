@@ -471,8 +471,9 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     data_iter = iter(loader)
     model.train()
     step              = start_step
-    loss_accum        = aux_accum = prerouter_accum = 0.0
+    loss_accum        = aux_accum = prerouter_accum = gnorm_accum = 0.0
     avg_loss          = 0.0
+    _gnorm_ema        = None   # exponential moving average for spike detection
     t0                = time.time()
 
     print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
@@ -548,7 +549,15 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             aux_accum       += aux.item()
             prerouter_accum += getattr(model, "_last_prerouter_aux", torch.tensor(0.0)).item()
 
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0).item()
+        gnorm_accum += grad_norm
+        # Spike detection: warn if norm is >3× the running EMA
+        if _gnorm_ema is None:
+            _gnorm_ema = grad_norm
+        else:
+            _gnorm_ema = 0.98 * _gnorm_ema + 0.02 * grad_norm
+            if grad_norm > 3.0 * _gnorm_ema and grad_norm > 1.0:
+                print(f"  ⚡ Grad norm spike at step {step+1}: {grad_norm:.2f} (ema={_gnorm_ema:.2f})", flush=True)
         optimizer.step()
         step += 1
 
@@ -557,15 +566,16 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             avg_loss      = loss_accum      / (LOG_EVERY * train_cfg.grad_accum)
             avg_aux       = aux_accum       / (LOG_EVERY * train_cfg.grad_accum)
             avg_prerouter = prerouter_accum / (LOG_EVERY * train_cfg.grad_accum)
+            avg_gnorm     = gnorm_accum     / LOG_EVERY
             tok_sec       = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum * SEQ_LEN) / (t1 - t0)
             top1_frac     = check_moe_collapse(model, model_cfg, step)
             print(
                 f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
-                f"prerouter_kl {avg_prerouter:.4f} | moe_top1 {top1_frac:.1%} | "
-                f"loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s",
+                f"prerouter_kl {avg_prerouter:.4f} | gnorm {avg_gnorm:.3f} | "
+                f"moe_top1 {top1_frac:.1%} | loops {n_loops} | lr {lr:.2e} | {tok_sec:,.0f} tok/s",
                 flush=True,
             )
-            loss_accum = aux_accum = prerouter_accum = 0.0
+            loss_accum = aux_accum = prerouter_accum = gnorm_accum = 0.0
             t0 = t1
 
         if step % SAVE_EVERY == 0:
@@ -578,6 +588,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
                     "loss":         round(avg_loss,      5),
                     "aux":          round(avg_aux,        5),
                     "prerouter_kl": round(avg_prerouter,  5),
+                    "grad_norm":    round(avg_gnorm,      4),
                     "moe_aux_coef": model_cfg.moe_aux_coef,
                 }
                 import json as _json

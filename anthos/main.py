@@ -133,6 +133,12 @@ class AnthosConfig:
     n_mtp_heads:           int   = 0
     mtp_loss_coef:         float = 0.3
 
+    # Z-loss: penalises log(Z)² where Z = sum(exp(logits)) over vocab.
+    # Prevents logit scale explosion / softmax saturation — critical when
+    # MoE + MTP heads both push the output head in different directions.
+    # OLMo-core uses 1e-4; safe to raise to 1e-3 if logits drift above ±30.
+    zloss_coef:            float = 1e-4
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalization
@@ -1059,10 +1065,19 @@ class Anthos(nn.Module):
             if n_valid > 0:
                 mtp_aux = mtp_aux / n_valid
 
+        # Z-loss: encourages log(Z) ≈ 0, preventing softmax saturation.
+        # Computed over the full (B*T, V) logit tensor; mean over positions.
+        if self.cfg.zloss_coef > 0:
+            log_z = torch.logsumexp(logits.view(-1, self.cfg.vocab_size), dim=-1)  # (B*T,)
+            z_loss = (log_z ** 2).mean()
+        else:
+            z_loss = logits.new_zeros(1)
+
         aux_loss = (self.cfg.moe_aux_coef        * moe_aux        +
                     self.cfg.act_aux_coef         * act_aux        +
                     self.cfg.prerouter_loss_coef  * prerouter_aux  +
-                    self.cfg.mtp_loss_coef        * mtp_aux)
+                    self.cfg.mtp_loss_coef        * mtp_aux        +
+                    self.cfg.zloss_coef           * z_loss)
         return logits, aux_loss
 
     def get_hidden_states(self) -> torch.Tensor:
