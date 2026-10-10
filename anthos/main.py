@@ -119,6 +119,20 @@ class AnthosConfig:
     act_aux_coef:          float = 1e-3
     prerouter_loss_coef:   float = 0.05   # KL weight: prerouter head vs real MoE routing
 
+    # Multi-Token Prediction
+    # Extra prediction heads that teach the model to predict tokens 2, 3, ... steps
+    # ahead from the same Coda hidden state. Each head is a lightweight RMSNorm that
+    # feeds into the shared self.head projection (weight-tied to embeddings), so
+    # adding 2 MTP heads costs only 2 × dim extra parameters.
+    #
+    # n_mtp_heads=0  → disabled (default, fully backward compatible)
+    # n_mtp_heads=2  → predict t+2 and t+3 in addition to t+1
+    #
+    # Loss: mtp_loss_coef * mean(CE_k for each depth k)
+    # Nemotron Lightning uses mtp_loss_coef=0.3 — start there.
+    n_mtp_heads:           int   = 0
+    mtp_loss_coef:         float = 0.3
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalization
@@ -895,6 +909,14 @@ class Anthos(nn.Module):
         self.head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         self.head.weight = self.embed.weight   # weight tying
 
+        # MTP heads — one lightweight RMSNorm per extra prediction depth.
+        # Each norm feeds into self.head (shared, weight-tied), so parameter
+        # overhead is minimal: n_mtp_heads × dim floats.
+        # head k=0 → predicts t+2, head k=1 → predicts t+3, etc.
+        self.mtp_norms = nn.ModuleList(
+            [RMSNorm(cfg.dim) for _ in range(cfg.n_mtp_heads)]
+        )
+
         self._init_weights()
 
     def _init_weights(self) -> None:
@@ -1015,9 +1037,32 @@ class Anthos(nn.Module):
         if not return_aux:
             return logits
 
-        aux_loss = (self.cfg.moe_aux_coef      * moe_aux       +
-                    self.cfg.act_aux_coef      * act_aux       +
-                    self.cfg.prerouter_loss_coef * prerouter_aux)
+        # ── Multi-Token Prediction auxiliary loss ─────────────────────────────
+        # Each MTP head k predicts token t+k from x_normed[:, :T-k, :] via its
+        # own RMSNorm followed by the shared head projection (weight-tied).
+        # Loss is averaged across depths, then scaled by mtp_loss_coef.
+        # Skipped when n_mtp_heads=0 (no extra computation, fully backward compat).
+        mtp_aux = x_normed.new_zeros(1)
+        if self.cfg.n_mtp_heads > 0 and T > 1:
+            n_valid = 0
+            for k_idx, mtp_norm in enumerate(self.mtp_norms):
+                k = k_idx + 2   # first head predicts t+2, second t+3, etc.
+                if T <= k:
+                    continue
+                mtp_logits_k = self.head(mtp_norm(x_normed[:, : T - k, :]))   # (B, T-k, V)
+                mtp_targets  = input_ids[:, k:]                                # (B, T-k)
+                mtp_aux = mtp_aux + F.cross_entropy(
+                    mtp_logits_k.reshape(-1, self.cfg.vocab_size),
+                    mtp_targets.reshape(-1),
+                )
+                n_valid += 1
+            if n_valid > 0:
+                mtp_aux = mtp_aux / n_valid
+
+        aux_loss = (self.cfg.moe_aux_coef        * moe_aux        +
+                    self.cfg.act_aux_coef         * act_aux        +
+                    self.cfg.prerouter_loss_coef  * prerouter_aux  +
+                    self.cfg.mtp_loss_coef        * mtp_aux)
         return logits, aux_loss
 
     def get_hidden_states(self) -> torch.Tensor:
