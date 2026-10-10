@@ -606,3 +606,271 @@ python -c "import torch; print(torch.cuda.device_count(), 'GPUs')"
 ```
 
 Recommended: PyTorch ≥ 2.1 for `torch.distributed.checkpoint` sharded saves.
+
+---
+
+## ORPO — Reference-Free Alignment
+
+Single-pass SFT + alignment: no reference model, ~2× more efficient than DPO.
+
+```python
+from anthos.orpo import ORPOConfig, ORPODataset, ORPOTrainer, orpo_collate
+from torch.utils.data import DataLoader
+
+cfg     = ORPOConfig(beta=0.1, lr=5e-6)
+trainer = ORPOTrainer.from_pretrained("checkpoints/sft/step_001000.pt", tier="sft", cfg=cfg)
+dataset = ORPODataset("data/preferences.jsonl", "data/anthos_tokenizer")
+# JSONL format: {"prompt": "...", "chosen": "...", "rejected": "..."}
+for batch in DataLoader(dataset, batch_size=2, collate_fn=orpo_collate):
+    loss, metrics = trainer.step(batch)
+    print(f"loss={metrics['loss']:.4f}  or_loss={metrics['or_loss']:.4f}")
+```
+
+---
+
+## SPIN — Self-Play Fine-Tuning
+
+Iterative self-improvement: model learns to beat a frozen copy of itself.
+
+```python
+from anthos.spin import SPINConfig, SPINTrainer
+
+trainer = SPINTrainer.from_pretrained("checkpoints/sft/step_001000.pt", tier="sft")
+# Iteration 0: opponent = initial checkpoint
+trainer.run_iteration("data/sft.jsonl", "data/anthos_tokenizer", n_steps=500)
+# Save checkpoint, advance opponent for next iteration:
+trainer.advance_opponent()
+```
+
+---
+
+## Constitutional AI
+
+Critique + revise pipeline for harmlessness data generation.
+
+```python
+from anthos.constitutional import ConstitutionalAI, ConstitutionalConfig
+
+cai = ConstitutionalAI.from_pretrained("checkpoints/sft/step_001000.pt", tier="sft")
+results = cai.run(
+    prompts=["How do I pick a lock?", "Write something offensive."],
+    output_path="data/constitutional_revisions.jsonl",
+)
+# Output: SFT-ready {"prompt": ..., "completion": ...} JSONL
+```
+
+---
+
+## Speculative Decoding
+
+2–4× inference speedup using a small draft model + large verifier.
+
+```python
+from anthos.spec_decode import SpecDecoder
+from anthos.main import Anthos
+from anthos.configs import get_training_config
+
+draft_cfg,    _ = get_training_config("nano")
+verifier_cfg, _ = get_training_config("proof")
+draft    = Anthos(draft_cfg)
+verifier = Anthos(verifier_cfg)
+# ... load checkpoints ...
+
+decoder = SpecDecoder(draft=draft, verifier=verifier, n_draft=5,
+                      n_loops_draft=4, n_loops_verifier=12)
+output_ids = decoder.generate(input_ids, max_new_tokens=256)
+```
+
+Best results when draft and verifier share the same tokenizer and the task
+is low-entropy (code generation, factual QA).
+
+---
+
+## Model Merging
+
+Combine multiple checkpoints without re-training.
+
+```python
+from anthos.merge import slerp, ties_merge, dare_merge, bake_lora
+
+# SLERP: smooth midpoint between two fine-tuned variants
+merged = slerp("ckpt_a.pt", "ckpt_b.pt", t=0.5, output="merged.pt")
+
+# TIES: merge multiple task specialists, resolving sign conflicts
+merged = ties_merge(
+    ["math.pt", "code.pt", "chat.pt"],
+    base_path="base.pt", density=0.2, output="ties_merged.pt"
+)
+
+# DARE: random delta dropout before merging (reduces interference)
+merged = dare_merge(
+    ["math.pt", "code.pt"], base_path="base.pt",
+    drop_rate=0.9, output="dare_merged.pt"
+)
+
+# Bake LoRA adapter into base weights (zero inference overhead)
+merged = bake_lora("base.pt", lora_state_dict, rank=16, alpha=16.0,
+                   output="baked.pt")
+```
+
+| Method | Best for                        | Tradeoff                        |
+|--------|---------------------------------|---------------------------------|
+| SLERP  | 2 fine-tuned variants           | Smooth but limited to pairs     |
+| TIES   | 3+ task-specific models         | Slower; needs base model        |
+| DARE   | High-interference merges        | Stochastic; run multiple seeds  |
+| LoRA   | Any adapter                     | Exact; increases base size      |
+
+---
+
+## Reward Model Training
+
+Scalar reward head for RLHF or best-of-N reranking.
+
+```python
+from anthos.reward_model import RewardModelConfig, RewardModelTrainer, RewardDataset, rm_collate
+from torch.utils.data import DataLoader
+
+cfg     = RewardModelConfig(n_loops=8, lr=1e-5)
+trainer = RewardModelTrainer.from_pretrained("checkpoints/sft/step_001000.pt", tier="sft", cfg=cfg)
+dataset = RewardDataset("data/preferences.jsonl", "data/anthos_tokenizer")
+# JSONL: {"prompt": "...", "chosen": "...", "rejected": "..."}
+for batch in DataLoader(dataset, batch_size=4, collate_fn=rm_collate):
+    loss, acc = trainer.step(batch)
+    print(f"bt_loss={loss.item():.4f}  acc={acc:.3f}")
+
+# Score a batch for best-of-N reranking
+scores = trainer.score(candidate_ids)  # (B,) float
+best   = candidate_ids[scores.argmax()]
+```
+
+---
+
+## Data Mixing
+
+Multi-domain pretraining with configurable sampling weights.
+
+```python
+from anthos.data_mix import DataMixer, DomainConfig
+
+domains = [
+    DomainConfig("data/web.jsonl",   weight=0.70, name="web"),
+    DomainConfig("data/code.jsonl",  weight=0.15, name="code"),
+    DomainConfig("data/books.jsonl", weight=0.10, name="books"),
+    DomainConfig("data/math.jsonl",  weight=0.05, name="math"),
+]
+mixer = DataMixer(domains, tokenizer_path="data/anthos_tokenizer",
+                  seq_len=2048, batch_size=8,
+                  adaptive=True, adapt_every=1000)
+
+for step, batch in enumerate(mixer):
+    # batch: (B, seq_len+1) token ids; use [:, :-1] as input, [:, 1:] as target
+    loss = ...
+    if step % 1000 == 0:
+        mixer.update_weights({"web": web_loss, "code": code_loss, ...})
+        print(mixer.get_weights())
+```
+
+Set `adaptive=True` to enable DoReMi-style dynamic reweighting: harder
+domains receive more weight automatically.
+
+---
+
+## Hyperparameter Sweep (Optuna)
+
+Automated search over LR, batch size, LoRA rank, MoE coefficients, etc.
+
+```bash
+pip install optuna
+
+# Run 50 trials, persist results to SQLite
+python -m anthos.hparam_sweep \
+    --study-name anthos_sweep \
+    --storage sqlite:///sweep.db \
+    --n-trials 50 --tier nano --max-steps 200
+
+# Resume a study (adds 20 more trials)
+python -m anthos.hparam_sweep \
+    --study-name anthos_sweep \
+    --storage sqlite:///sweep.db \
+    --n-trials 20 --tier nano
+```
+
+The sweep uses MedianPruner to cut bad trials early. Edit
+`anthos/hparam_sweep.py → build_objective()` to search custom
+hyperparameters or plug in your real DataLoader.
+
+---
+
+## Differential Attention
+
+Cancels noise in attention maps for ~25% better long-context retrieval.
+
+```python
+from anthos.main import AnthosConfig, Anthos
+
+cfg = AnthosConfig(
+    attn_type     = "gqa",      # diff attn only supported for GQA path
+    use_diff_attn = True,
+)
+model = Anthos(cfg)
+```
+
+Each GQA head is split into two sub-heads; their softmax outputs are
+subtracted with a learned λ per head (init near 0 → standard attention
+at init, then specializes during training).
+
+---
+
+## Stochastic Depth
+
+Randomly skip transformer blocks during training for regularization.
+
+```python
+cfg = AnthosConfig(stochastic_depth_rate=0.2)
+# Layer drop rate ramps linearly from 0 (first layer) to 0.2 (last layer)
+# ~20% fewer FLOPs on average during training; disabled at eval/inference
+```
+
+| Rate | Benefit                              |
+|------|--------------------------------------|
+| 0.1  | Mild regularization; safe default    |
+| 0.2  | Strong regularization; ~20% speedup  |
+| 0.3  | Aggressive; may hurt convergence     |
+
+---
+
+## Expert Choice Routing
+
+Experts select top-k tokens (vs. tokens selecting top-k experts).
+Guarantees perfectly uniform expert load — no auxiliary loss needed.
+
+```python
+cfg = AnthosConfig(use_expert_choice=True)
+# moe_aux_coef can be set to 0.0 — load balance is exact by construction
+```
+
+---
+
+## Streaming Inference (SSE)
+
+The inference server supports Server-Sent Events for real-time token streaming.
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="x")
+
+# Streaming completions
+for chunk in client.completions.create(
+    model="anthos", prompt="The meaning of life is",
+    max_tokens=128, stream=True,
+):
+    print(chunk.choices[0].text, end="", flush=True)
+
+# Streaming chat
+for chunk in client.chat.completions.create(
+    model="anthos",
+    messages=[{"role": "user", "content": "Tell me a story."}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```

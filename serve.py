@@ -152,7 +152,6 @@ def _generate(
     input_ids = _tokenizer.encode(prompt, return_tensors="pt").to(_device)
     n_prompt  = input_ids.shape[1]
 
-    # Effective top_k from top_p (approximate): use top_k if specified, else a large value
     _topk = top_k if top_k > 0 else 50
 
     out = _model.generate(
@@ -174,6 +173,61 @@ def _generate(
     return completion_text, n_prompt, len(completion_ids)
 
 
+@torch.no_grad()
+def _generate_stream(
+    prompt:      str,
+    max_tokens:  int   = 128,
+    temperature: float = 1.0,
+    top_k:       int   = 0,
+    stop:        Optional[list[str]] = None,
+    n_loops:     Optional[int]       = None,
+):
+    """
+    Token-by-token streaming generator.
+    Yields decoded string fragments as each token is produced.
+    """
+    import torch.nn.functional as _F
+
+    n_loops   = n_loops or _n_loops
+    _topk     = top_k if top_k > 0 else 50
+    kv_cache  = {}
+    generated = _tokenizer.encode(prompt, return_tensors="pt").to(_device)
+    n_prompt  = generated.shape[1]
+    accumulated = ""
+
+    for step in range(max_tokens):
+        ctx       = generated if step == 0 else generated[:, -1:]
+        start_pos = 0 if step == 0 else generated.shape[1] - 1
+
+        logits = _model(ctx, n_loops=n_loops, kv_cache=kv_cache, start_pos=start_pos)
+        logits = logits[:, -1, :] / max(temperature, 1e-6)
+
+        if _topk > 0:
+            v, _ = torch.topk(logits, _topk)
+            logits[logits < v[:, [-1]]] = float("-inf")
+
+        probs      = _F.softmax(logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        generated  = torch.cat([generated, next_token], dim=1)
+
+        token_text  = _tokenizer.decode([next_token.item()], skip_special_tokens=True)
+        accumulated += token_text
+
+        # Check stop sequences on accumulated text
+        if stop:
+            hit = False
+            for s in stop:
+                if s in accumulated:
+                    token_text = accumulated[:accumulated.index(s)]
+                    hit        = True
+                    yield token_text
+                    return
+            if not hit:
+                yield token_text
+        else:
+            yield token_text
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # FastAPI app
 # ─────────────────────────────────────────────────────────────────────────────
@@ -181,7 +235,7 @@ def _generate(
 def _build_app():
     try:
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import JSONResponse
+        from fastapi.responses import JSONResponse, StreamingResponse
         from pydantic import BaseModel
     except ImportError:
         raise ImportError(
@@ -202,6 +256,7 @@ def _build_app():
         top_k:       int   = 0
         stop:        Optional[list[str]] = None
         n_loops:     Optional[int]       = None
+        stream:      bool  = False
 
     class ChatMessage(BaseModel):
         role:    str
@@ -216,6 +271,7 @@ def _build_app():
         top_k:       int   = 0
         stop:        Optional[list[str]] = None
         n_loops:     Optional[int]       = None
+        stream:      bool  = False
 
     # ── Routes ────────────────────────────────────────────────────────────────
 
@@ -237,6 +293,24 @@ def _build_app():
 
     @app.post("/v1/completions")
     def completions(req: CompletionRequest):
+        if req.stream:
+            cid = f"cmpl-{uuid.uuid4().hex[:12]}"
+
+            def _sse():
+                for fragment in _generate_stream(
+                    req.prompt, req.max_tokens, req.temperature,
+                    req.top_k, req.stop, req.n_loops,
+                ):
+                    chunk = json.dumps({
+                        "id": cid, "object": "text_completion",
+                        "model": _model_name,
+                        "choices": [{"text": fragment, "index": 0, "finish_reason": None}],
+                    })
+                    yield f"data: {chunk}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_sse(), media_type="text/event-stream")
+
         t0 = time.time()
         text, n_prompt, n_comp = _generate(
             req.prompt, req.max_tokens, req.temperature,
@@ -258,8 +332,31 @@ def _build_app():
 
     @app.post("/v1/chat/completions")
     def chat_completions(req: ChatRequest):
-        t0     = time.time()
         prompt = _apply_chatml([m.dict() for m in req.messages])
+
+        if req.stream:
+            cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
+            def _sse():
+                for fragment in _generate_stream(
+                    prompt, req.max_tokens, req.temperature,
+                    req.top_k, req.stop, req.n_loops,
+                ):
+                    chunk = json.dumps({
+                        "id": cid, "object": "chat.completion.chunk",
+                        "model": _model_name,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"role": "assistant", "content": fragment},
+                            "finish_reason": None,
+                        }],
+                    })
+                    yield f"data: {chunk}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_sse(), media_type="text/event-stream")
+
+        t0     = time.time()
         text, n_prompt, n_comp = _generate(
             prompt, req.max_tokens, req.temperature,
             req.top_p, req.top_k, req.stop, req.n_loops,
