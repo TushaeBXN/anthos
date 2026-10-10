@@ -118,14 +118,53 @@ def generate_samples(
     model.train()
     return samples
 
+def get_param_groups(model: Anthos, weight_decay: float = 0.1) -> list[dict]:
+    """
+    Separate parameters into two groups:
+      - decay:    weight matrices (ndim >= 2) — applies weight_decay
+      - no_decay: LayerNorm weights, biases, embedding weights — no decay
+
+    OLMo-core pattern: decaying embeddings or LayerNorm params hurts
+    convergence because they lack the redundancy of weight matrices.
+    """
+    decay, no_decay = set(), set()
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Bias terms: always no-decay
+        if name.endswith(".bias"):
+            no_decay.add(name)
+        # Embedding weight matrices: no-decay (they're lookup tables, not linear maps)
+        elif "embed" in name and param.ndim == 2:
+            no_decay.add(name)
+        # LayerNorm / RMSNorm scale: 1-D, no-decay
+        elif param.ndim == 1:
+            no_decay.add(name)
+        else:
+            decay.add(name)
+
+    param_map = {n: p for n, p in model.named_parameters() if p.requires_grad}
+    assert not (decay & no_decay), "Param appeared in both groups"
+    assert decay | no_decay == set(param_map.keys()), "Not all params accounted for"
+
+    return [
+        {"params": [param_map[n] for n in sorted(decay)],    "weight_decay": weight_decay},
+        {"params": [param_map[n] for n in sorted(no_decay)], "weight_decay": 0.0},
+    ]
+
+
 def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float, keep: int = 3):
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
     torch.save({
         "step":      step,
         "loss":      loss,
         "model":     model.state_dict(),
         "optimizer": optimizer.state_dict(),
-    }, path)
+        "rng_cpu":   torch.get_rng_state(),
+        "rng_cuda":  torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+    }, tmp_path)
+    os.replace(tmp_path, path)
     print(f"  ✓ Saved checkpoint → {path}")
     # Rolling window — delete oldest beyond `keep`
     checkpoints = sorted(path.parent.glob("step_*.pt"))
@@ -263,7 +302,11 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
     print(f"{'─'*60}\n")
 
     use_fused = True if device == "cuda" else False
-    optimizer = AdamW(model.parameters(), lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
+    param_groups = get_param_groups(model, weight_decay=0.1)
+    optimizer = AdamW(param_groups, lr=MAX_LR, betas=(0.9, 0.95), fused=use_fused)
+    n_decay    = sum(p.numel() for p in param_groups[0]["params"])
+    n_no_decay = sum(p.numel() for p in param_groups[1]["params"])
+    print(f"  Optimizer: decay {n_decay:,} params | no-decay {n_no_decay:,} params | wd=0.1")
 
     start_step = 0
     if resume:
@@ -278,6 +321,11 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             try:
                 optimizer.load_state_dict(ckpt["optimizer"])
                 start_step = ckpt["step"]
+                if "rng_cpu" in ckpt:
+                    torch.set_rng_state(ckpt["rng_cpu"])
+                if "rng_cuda" in ckpt and ckpt["rng_cuda"] and torch.cuda.is_available():
+                    torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
+                print(f"  ✓ Restored RNG state from checkpoint")
             except ValueError:
                 start_step = 0
                 print(f"  ℹ Optimizer groups changed (new modules added) — resetting optimizer, resuming from step 0")
