@@ -153,12 +153,14 @@ def get_param_groups(model: Anthos, weight_decay: float = 0.1) -> list[dict]:
     ]
 
 
-def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float, keep: int = 3):
+def save_checkpoint(path: Path, model: Anthos, optimizer: AdamW, step: int, loss: float,
+                    data_step: int = 0, keep: int = 3):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
     torch.save({
         "step":      step,
         "loss":      loss,
+        "data_step": data_step,
         "model":     model.state_dict(),
         "optimizer": optimizer.state_dict(),
         "rng_cpu":   torch.get_rng_state(),
@@ -468,7 +470,27 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             prefix_confidence=3,
         )
 
-    data_iter = iter(loader)
+    data_iter  = iter(loader)
+    data_step  = 0
+
+    # Resume dataloader position so we never replay the same batches.
+    # We skip `resume_data_step` batches by fast-forwarding the iterator.
+    resume_data_step = 0
+    if resume:
+        _rckpt = torch.load(resume, map_location="cpu", weights_only=False)
+        resume_data_step = _rckpt.get("data_step", 0)
+        del _rckpt
+    if resume_data_step > 0:
+        print(f"  ⏩ Fast-forwarding dataloader by {resume_data_step} batches...", flush=True)
+        for _ in range(resume_data_step):
+            try:
+                next(data_iter)
+            except StopIteration:
+                data_iter = iter(loader)
+                next(data_iter)
+        data_step = resume_data_step
+        print(f"  ✓ Dataloader resumed at batch {data_step}", flush=True)
+
     model.train()
     step              = start_step
     loss_accum        = aux_accum = prerouter_accum = gnorm_accum = 0.0
@@ -491,6 +513,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
             except StopIteration:
                 data_iter = iter(loader)
                 batch     = next(data_iter)
+            data_step += 1
 
             if is_distill:
                 input_ids       = batch[0].to(device)[:, :SEQ_LEN]
@@ -580,7 +603,7 @@ def train(tier: str = "proof", resume: str | None = None, teacher_labels: str | 
 
         if step % SAVE_EVERY == 0:
             _ckpt_path = ckpt_dir / f"step_{step:06d}.pt"
-            save_checkpoint(_ckpt_path, model, optimizer, step, avg_loss)
+            save_checkpoint(_ckpt_path, model, optimizer, step, avg_loss, data_step=data_step)
             try:
                 _tel = _telemetry_harness.record(model, tokenizer=None, ckpt_path=str(_ckpt_path), step=step)
                 # Attach training-loop scalars so the sidecar captures the live run state

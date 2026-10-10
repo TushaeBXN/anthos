@@ -86,6 +86,7 @@ class EAFTLoss(nn.Module):
         max_loops:       int   = 16,
         label_smoothing: float = 0.1,
         reduction:       str   = "mean",
+        chunk_size:      int   = 1024,
     ):
         super().__init__()
         self.vocab_size      = vocab_size
@@ -95,6 +96,7 @@ class EAFTLoss(nn.Module):
         self.max_loops       = max_loops
         self.label_smoothing = label_smoothing
         self.reduction       = reduction
+        self.chunk_size      = chunk_size  # positions per CE chunk (memory vs speed)
 
         # log(k) for normalising entropy to [0, 1]
         self._log_k = math.log(self.top_k)
@@ -162,18 +164,33 @@ class EAFTLoss(nn.Module):
             if loops_used is not None and self.act_gamma > 0:
                 w = w * self._act_weights(loops_used)
 
-        # ── Per-position cross-entropy ─────────────────────────────────────
-        # Use label smoothing via F.cross_entropy with reduction="none"
+        # ── Per-position cross-entropy (chunked) ──────────────────────────
+        # Processing all B*T positions at once materialises a (B*T, V) float32
+        # tensor (~400 MB for B=4,T=512,V=50262).  Chunking over positions
+        # keeps peak activation memory proportional to chunk_size instead of
+        # B*T, at no accuracy cost and negligible throughput overhead.
         logits_2d = logits.view(B * T, V)
         labels_1d = labels.view(B * T)
+        N = B * T
 
-        ce = F.cross_entropy(
-            logits_2d,
-            labels_1d,
-            reduction       = "none",
-            label_smoothing = self.label_smoothing,
-            ignore_index    = -100,
-        ).view(B, T)                                                 # (B, T)
+        if self.chunk_size >= N:
+            ce_1d = F.cross_entropy(
+                logits_2d, labels_1d,
+                reduction="none", label_smoothing=self.label_smoothing,
+                ignore_index=-100,
+            )
+        else:
+            ce_parts = []
+            for start in range(0, N, self.chunk_size):
+                end = min(start + self.chunk_size, N)
+                ce_parts.append(F.cross_entropy(
+                    logits_2d[start:end], labels_1d[start:end],
+                    reduction="none", label_smoothing=self.label_smoothing,
+                    ignore_index=-100,
+                ))
+            ce_1d = torch.cat(ce_parts, dim=0)
+
+        ce = ce_1d.view(B, T)                                        # (B, T)
 
         # ── Apply weights ──────────────────────────────────────────────────
         weighted = ce * w.detach()                                   # (B, T)
