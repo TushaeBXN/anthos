@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
-from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader, get_markdown_dataloader
+from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader, get_markdown_dataloader, next_token_pair
 from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
 from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
@@ -722,7 +722,8 @@ def train(
             elif is_sft:
                 input_ids       = batch[0].to(device)[:, :_eff_seq]
                 labels          = batch[1].to(device)[:, :_eff_seq]
-                input_ids_in    = input_ids
+                # next-token alignment: position i must predict token i+1 (labels are unshifted)
+                input_ids_in, labels = next_token_pair(input_ids, labels)
             else:
                 batch        = batch.to(device)
                 input_ids_in = batch[:, :_eff_seq-1]

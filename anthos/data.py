@@ -521,6 +521,12 @@ class ChatInstructDataset(IterableDataset):
         return 517_982   # SlimOrca size
 
 
+def next_token_pair(input_ids: torch.Tensor, labels: torch.Tensor):
+    """Align (B, T) ids/labels for next-token prediction: position i predicts token i+1.
+    Labels from the SFT datasets are unshifted, so both tensors must be offset here."""
+    return input_ids[:, :-1], labels[:, 1:]
+
+
 def get_chat_dataloader(
     seq_len:        int,
     batch_size:     int,
