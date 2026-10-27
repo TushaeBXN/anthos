@@ -83,6 +83,27 @@ python3 train.py --tier convo_smoke --thought-prefix-only --resume <checkpoint>
   stub tokenizer). **Not verified:** a real `train.py` run, since this machine's Python has no
   `transformers` / `datasets`; do a short `--steps 20` run first.
 
+## Decode speed: frozen-thought K/V (`cfg.fast_thought_decode`, default on in prefix mode)
+
+A decode step used to push all `n_thought` thought rows plus the new token through every loop just to
+rebuild thought K/V that never change. Now the thought K/V cached at prefill are reused and only the new
+token goes through the block (prerouter aux is skipped in this path, as there are no thought rows to route).
+`fast_thought_decode=False` keeps the reference path for A/B checks; tests assert the two agree (<=1e-5).
+
+Measured with `bench_speed.py` (random weights, CPU, Apple M-series, 16 thought tokens; decode tok/s):
+
+| config | loops | reference | fast | speedup |
+|---|---|---|---|---|
+| 16M params, prompt 128 | 4 | 282 | 364 | 1.29x |
+| 16M params, prompt 128 | 16 | 97 | 138 | 1.43x |
+| 75M params, prompt 256 | 4 | 103 | 146 | 1.42x |
+| 75M params, prompt 256 | 16 | 35 | 62 | 1.77x |
+
+The gain grows with model size and loop count. Small configs are dominated by Python/dispatch overhead,
+so do not extrapolate these to a GPU or to 1B+ parameters without re-running the script there.
+Decode cost is also still linear in loops (35 tok/s at 16 loops vs 103 at 4): the loop count is the
+latency dial, and early exit / speculative drafting in cache mode are the next levers.
+
 ## Not done yet
 
 - **SpecDecoder** (`anthos/spec_decode.py`) calls the model without `prefix_len` and verifies with

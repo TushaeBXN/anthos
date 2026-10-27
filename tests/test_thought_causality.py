@@ -168,3 +168,24 @@ def test_decode_with_more_loops_than_prefill_is_rejected():
         m(ids, n_loops=2, kv_cache=cache, prefix_len=5)
         with pytest.raises(ValueError):
             m(ids[:, -1:], n_loops=3, kv_cache=cache, start_pos=5, prefix_len=5)
+
+
+@pytest.mark.parametrize("attn_type", ["gqa", "mla"])
+def test_fast_thought_decode_matches_reference_path(attn_type):
+    """Feeding only the new token must equal the slow path that re-sends the thought rows."""
+    ids = torch.randint(0, 100, (2, T))
+    prompt = 5
+
+    def run(fast):
+        cfg = _cfg(attn_type, True)
+        cfg.fast_thought_decode = fast
+        torch.manual_seed(0)
+        m = Anthos(cfg).eval()
+        cache = {}
+        with torch.no_grad():
+            outs = [m(ids[:, :prompt], n_loops=4, kv_cache=cache, prefix_len=prompt)]
+            for i in range(prompt, T):
+                outs.append(m(ids[:, i:i + 1], n_loops=4, kv_cache=cache, start_pos=i, prefix_len=prompt))
+        return torch.cat(outs, dim=1)
+
+    assert (run(True) - run(False)).abs().max() <= 1e-5

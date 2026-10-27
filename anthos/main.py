@@ -164,6 +164,12 @@ class AnthosConfig:
     # behave as before. Enable together with thought_prefix_only for a causal model.
     moe_fix_weight_order:  bool  = False
 
+    # Frozen-thought decode shortcut (only used with thought_prefix_only). A decode step
+    # normally pushes the n_thought thought rows plus the new token through every loop just
+    # to rebuild thought K/V that never change. True feeds only the new token and reuses the
+    # thought K/V cached at prefill. False keeps the slower reference path (for A/B checks).
+    fast_thought_decode:   bool  = True
+
     # YaRN RoPE scaling: extend context beyond max_seq_len at inference time.
     # Set rope_scaling_type="yarn" and rope_scaling_factor > 1.0 to enable.
     # Example: trained at max_seq_len=4096, extend to 32k with factor=8.0.
@@ -494,7 +500,7 @@ class GQAttention(nn.Module):
                 n_th = kv_cache[cache_key]["n_thought"]
                 pos  = kv_cache[cache_key]["seq_pos"]
                 end  = pos + T_new
-                if n_th > 0:
+                if n_th > 0 and n_thought_prefix > 0:   # frozen-thought decode passes no thought rows
                     kv_cache[cache_key]["k"][:, :n_th].copy_(k[:, :n_th])
                     kv_cache[cache_key]["v"][:, :n_th].copy_(v[:, :n_th])
                 kv_cache[cache_key]["k"][:, n_th + pos:n_th + end].copy_(k_new)
@@ -695,7 +701,7 @@ class MLAttention(nn.Module):
                 n_th = kv_cache[cache_key]["n_thought"]
                 pos  = kv_cache[cache_key]["seq_pos"]
                 end  = pos + T_new
-                if n_th > 0:
+                if n_th > 0 and n_thought_prefix > 0:   # frozen-thought decode passes no thought rows
                     kv_cache[cache_key]["c_kv"][:, :n_th].copy_(c_kv[:, :n_th])
                     kv_cache[cache_key]["k_rope"][:, :n_th].copy_(k_rope[:, :n_th])
                 kv_cache[cache_key]["c_kv"][:, n_th + pos:n_th + end].copy_(c_kv_new)
@@ -1289,6 +1295,8 @@ class AnthosRecurrentBlock(nn.Module):
         # With a cache in prefix mode every loop must run (no early exit) so each loop's
         # cached K/V covers every position; decode steps then find them all.
         run_all_loops = frozen_in is not None or frozen_out is not None
+        fast_decode   = (frozen_in is not None and self.cfg.fast_thought_decode
+                         and not self.cfg.use_diff_attn and not self.cfg.use_mod)
 
         for t in range(n_loops):
             if frozen_in is not None:
@@ -1303,8 +1311,15 @@ class AnthosRecurrentBlock(nn.Module):
 
             loop_emb       = self.loop_embeds[min(t, self.loop_embeds.shape[0] - 1)]
             h_combined     = self.h_pre_norm(h + loop_emb) + e_normed
-            full_seq       = torch.cat([thoughts, h_combined], dim=1)
-            combined_freqs = _anthos_rope_freqs(freqs_cis, thought_freqs_0, self.n_thought, T)
+            if fast_decode:
+                # Thought K/V for this loop are already in the cache from prefill: send only the new token.
+                full_seq       = h_combined
+                combined_freqs = freqs_cis[:T]
+                n_prefix       = 0
+            else:
+                full_seq       = torch.cat([thoughts, h_combined], dim=1)
+                combined_freqs = _anthos_rope_freqs(freqs_cis, thought_freqs_0, self.n_thought, T)
+                n_prefix       = self.n_thought
 
             cache_key = f"anthos_loop_{t}"
             if self.cfg.gradient_checkpointing and kv_cache is None:
@@ -1314,16 +1329,19 @@ class AnthosRecurrentBlock(nn.Module):
                 from torch.utils.checkpoint import checkpoint as _ckpt
                 full_out, moe_aux = _ckpt(
                     self.block, full_seq, combined_freqs, combined_mask,
-                    None, cache_key, self.n_thought,
+                    None, cache_key, n_prefix,
                     use_reentrant=False,
                 )
             else:
-                full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, self.n_thought)
+                full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, n_prefix)
             full_out = full_out + self.lora(full_out, t)
             moe_aux_total     = moe_aux_total + moe_aux
 
-            thought_out = full_out[:, :self.n_thought, :]
-            seq_out     = full_out[:, self.n_thought:,  :]
+            if fast_decode:
+                seq_out = full_out
+            else:
+                thought_out = full_out[:, :self.n_thought, :]
+                seq_out     = full_out[:, self.n_thought:,  :]
 
             if frozen_in is None:
                 thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
@@ -1352,6 +1370,10 @@ class AnthosRecurrentBlock(nn.Module):
             kv_cache["_frozen_thoughts"] = frozen_out
 
         act_aux = loops_used.mean()  # differentiable ACT penalty
+
+        if fast_decode:
+            # No thought rows went through the block, so there is no routing to compare against.
+            return h_out, moe_aux_total, act_aux, memory_state, loops_used, h.new_zeros(()), halt_probs
 
         # ── PreRouter aux loss ────────────────────────────────────────────────
         # Predict expert selection from final thought states and compare against
