@@ -37,15 +37,43 @@ Two independent causes. Both have to be fixed:
 
 Both flags default to False; no new parameters, so existing checkpoints load as before.
 
-## Not done yet (needed before real use)
+## Cached decoding in prefix mode
 
-- **Decode with thoughts frozen after prefill.** `generate()` currently recomputes thoughts every
-  step. In prefix mode a decode step raises `NotImplementedError` rather than being silently wrong.
-  The fix is to compute thoughts once from the prompt and reuse their per-loop K/V.
+Because thoughts depend only on the prompt, they are computed once at prefill and reused:
+
+- Prefill saves each loop's thoughts in `kv_cache["_frozen_thoughts"]` (a list of tensors).
+- A one-token decode step reads them back instead of recomputing, and skips the thought and
+  MemoryBank updates. Every loop runs in cache mode (no early ACT exit) so each loop's cached K/V
+  covers every position.
+- `generate()` passes `prefix_len = prompt length` automatically in this mode.
+- Test: prefill + step-by-step decode matches one full forward pass (max diff ~2e-7 on a tiny model).
+
+Decode needs the same `n_loops` as prefill (otherwise `ValueError`), and one token per step
+(`NotImplementedError` for multi-token steps).
+
+## A separate bug found on the way: cached decode in prelude / coda
+
+`F.scaled_dot_product_attention(..., is_causal=True)` aligns its mask at the top-left. During cached
+decode the prelude and coda layers call it with a 1-token query over S cached keys, so the token only
+sees key 0 instead of the whole history. Cached decode vs a full forward differed by 0.36 on a tiny
+model because of this (1.8e-7 once fixed).
+
+This affects `generate()` for every config on current `main`, not only prefix mode. To keep default
+behaviour bit-identical (verified: forward and generate outputs are identical to `origin/main`), the
+corrected alignment is only used when `thought_prefix_only=True`. Turning it on for everyone is a
+one-line change (`self.attn.fix_cached_causal = True` in `TransformerBlock`) but changes generation
+for existing checkpoints, so it is left as your call.
+
+## Not done yet
+
 - **Training loop wiring.** `train.py` / the chat dataloader must pass `prefix_len` (prompt length per
   example); pretraining-style tiers can pass 0.
-- **Existing checkpoints were trained with both behaviours.** Turning the flags on changes their
-  outputs; they need a fine-tune (or retrain) in the new mode before comparing quality.
+- **SpecDecoder** (`anthos/spec_decode.py`) calls the model without `prefix_len` and verifies with
+  uncached full passes, so it does not work in prefix mode yet. (It also resamples rejected tokens
+  from `v_probs - softmax(zeros)` rather than `v_probs - draft_probs`; worth a look.)
+- **Existing checkpoints were trained with the leaks and the old attention alignment.** Turning the
+  flags on changes their outputs; they need a fine-tune (or retrain) in the new mode before comparing
+  quality.
 
 ## Why it matters
 

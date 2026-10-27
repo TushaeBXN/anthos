@@ -98,14 +98,14 @@ def test_prefix_mode_requires_prefix_len():
         m(torch.randint(0, 100, (1, T)), n_loops=2)
 
 
-def test_prefix_mode_decode_not_silently_wrong():
+def test_prefix_mode_multi_token_decode_is_rejected():
     m = _model("gqa", prefix_only=True)
     ids = torch.randint(0, 100, (1, 5))
     cache = {}
     with torch.no_grad():
         m(ids, n_loops=2, kv_cache=cache, prefix_len=5)
         with pytest.raises(NotImplementedError):
-            m(ids[:, -1:], n_loops=2, kv_cache=cache, start_pos=5, prefix_len=5)
+            m(ids[:, -2:], n_loops=2, kv_cache=cache, start_pos=4, prefix_len=5)
 
 
 def test_moe_weight_order_fix_makes_each_token_independent():
@@ -133,3 +133,38 @@ def test_prefix_mode_rejects_cross_token_routers():
     cfg.use_expert_choice = True
     with pytest.raises(ValueError):
         Anthos(cfg)
+
+
+@pytest.mark.parametrize("attn_type", ["gqa", "mla"])
+def test_cached_decode_matches_full_forward(attn_type):
+    """Prefill + one-token decode steps must reproduce a single full forward pass."""
+    m = _model(attn_type, prefix_only=True)
+    ids = torch.randint(0, 100, (1, T))
+    prompt = 5
+    with torch.no_grad():
+        full = m(ids, n_loops=4, prefix_len=prompt)
+        cache = {}
+        pre = m(ids[:, :prompt], n_loops=4, kv_cache=cache, prefix_len=prompt)
+        steps = [pre]
+        for i in range(prompt, T):
+            steps.append(m(ids[:, i:i + 1], n_loops=4, kv_cache=cache, start_pos=i, prefix_len=prompt))
+        cached = torch.cat(steps, dim=1)
+    assert (full - cached).abs().max() <= 1e-5
+
+
+def test_generate_runs_in_prefix_mode_and_keeps_prompt():
+    m = _model("gqa", prefix_only=True)
+    ids = torch.randint(0, 100, (1, 5))
+    out = m.generate(ids, max_new_tokens=6, n_loops=4, top_k=10)
+    assert out.shape == (1, 11)
+    assert torch.equal(out[:, :5], ids)
+
+
+def test_decode_with_more_loops_than_prefill_is_rejected():
+    m = _model("gqa", prefix_only=True)
+    ids = torch.randint(0, 100, (1, 5))
+    cache = {}
+    with torch.no_grad():
+        m(ids, n_loops=2, kv_cache=cache, prefix_len=5)
+        with pytest.raises(ValueError):
+            m(ids[:, -1:], n_loops=3, kv_cache=cache, start_pos=5, prefix_len=5)

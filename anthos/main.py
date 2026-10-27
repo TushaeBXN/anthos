@@ -414,11 +414,29 @@ def _prefix_mean(e: torch.Tensor, prefix_len: torch.Tensor) -> torch.Tensor:
     return (e * keep.unsqueeze(-1)).sum(dim=1) / denom
 
 
+def _causal_sdpa(q, k, v, fix_cached: bool, attn_mask=None):
+    """
+    Causal SDPA that stays correct when the query is shorter than the keys (cached decode).
+
+    F.scaled_dot_product_attention(is_causal=True) aligns the mask at the top-left, so a
+    1-token query over S cached keys would only see key 0. With fix_cached the mask is
+    aligned at the bottom-right instead (each query sees every earlier key and itself).
+    fix_cached=False keeps the legacy behaviour byte-for-byte.
+    """
+    T, S = q.shape[-2], k.shape[-2]
+    if fix_cached and T != S:
+        keep = torch.ones(T, S, dtype=torch.bool, device=q.device).tril(diagonal=S - T)
+        return F.scaled_dot_product_attention(q, k, v, attn_mask=keep)
+    return F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Grouped Query Attention
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GQAttention(nn.Module):
+    fix_cached_causal: bool = False   # set by TransformerBlock from cfg.thought_prefix_only
+
     def __init__(self, cfg: AnthosConfig):
         super().__init__()
         self.n_heads    = cfg.n_heads
@@ -493,7 +511,7 @@ class GQAttention(nn.Module):
 
         q = q.transpose(1, 2);  k = k.transpose(1, 2);  v = v.transpose(1, 2)
         if is_causal and mask is None:
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            out = _causal_sdpa(q, k, v, self.fix_cached_causal)
         else:
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.wo(out.transpose(1, 2).contiguous().view(B, T, -1))
@@ -519,6 +537,8 @@ class DiffGQAttention(nn.Module):
     Architecture: head_dim is halved per sub-head (Q1/Q2 each get head_dim//2),
     so total parameter count matches standard GQA.
     """
+
+    fix_cached_causal: bool = False   # set by TransformerBlock from cfg.thought_prefix_only
 
     def __init__(self, cfg: AnthosConfig):
         super().__init__()
@@ -584,8 +604,12 @@ class DiffGQAttention(nn.Module):
         am = mask if not (is_causal and mask is None) else None
         ic = is_causal and mask is None
 
-        a1 = F.scaled_dot_product_attention(q1, k1, v, attn_mask=am, is_causal=ic)
-        a2 = F.scaled_dot_product_attention(q2, k2, v, attn_mask=am, is_causal=ic)
+        if ic and self.fix_cached_causal and q1.shape[-2] != k1.shape[-2]:
+            a1 = _causal_sdpa(q1, k1, v, True)
+            a2 = _causal_sdpa(q2, k2, v, True)
+        else:
+            a1 = F.scaled_dot_product_attention(q1, k1, v, attn_mask=am, is_causal=ic)
+            a2 = F.scaled_dot_product_attention(q2, k2, v, attn_mask=am, is_causal=ic)
 
         # λ per-head: exp(λq1·λk1) - exp(λq2·λk2)
         lam = (self.lambda_q1 * self.lambda_k1).exp() - (self.lambda_q2 * self.lambda_k2).exp()
@@ -600,6 +624,8 @@ class DiffGQAttention(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MLAttention(nn.Module):
+    fix_cached_causal: bool = False   # set by TransformerBlock from cfg.thought_prefix_only
+
     def __init__(self, cfg: AnthosConfig):
         super().__init__()
         self.n_heads     = cfg.n_heads
@@ -687,7 +713,7 @@ class MLAttention(nn.Module):
 
         q = q.transpose(1, 2);  k = k.transpose(1, 2);  v = v.transpose(1, 2)
         if is_causal and mask is None:
-            out = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            out = _causal_sdpa(q, k, v, self.fix_cached_causal)
         else:
             out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         return self.wo(out.transpose(1, 2).contiguous().view(B, T, -1))
@@ -958,6 +984,7 @@ class TransformerBlock(nn.Module):
             self.attn = GQAttention(cfg)
 
         self.ffn     = MoEFFN(cfg) if use_moe else Expert(cfg.dim, cfg.dim * 4 // 3)
+        self.attn.fix_cached_causal = cfg.thought_prefix_only
         self.use_moe = use_moe
 
         # Stochastic depth: linearly increase drop rate with layer depth
@@ -1231,24 +1258,49 @@ class AnthosRecurrentBlock(nn.Module):
         halt_probs   = torch.zeros(B, T, n_loops, device=h.device)  # (B, T, max_loop_iters)
 
         e_normed      = self.e_norm(e)
+        frozen_in  = None   # per-loop thoughts saved at prefill (decode steps read these)
+        frozen_out = None   # list being filled during prefill
         if self.cfg.thought_prefix_only:
-            if prefix_len is None:
-                raise ValueError("cfg.thought_prefix_only=True requires prefix_len (B,) on every forward pass.")
-            if kv_cache is not None and T == 1:
-                raise NotImplementedError(
-                    "thought_prefix_only decode needs thoughts frozen after prefill; "
-                    "this is not implemented yet. Use full forward passes for now."
-                )
-            e_summary     = _prefix_mean(e, prefix_len)                          # [B, D] — prompt only
-            e_thought     = e_summary.unsqueeze(1).expand_as(thoughts)
-            combined_mask = _anthos_prefix_mask(self.n_thought, T, prefix_len, h.device) if T > 1 else None
+            if kv_cache is not None and "_frozen_thoughts" in kv_cache:
+                # Decode step: thoughts depend only on the prompt, so reuse the per-loop
+                # thoughts saved at prefill instead of recomputing them.
+                if T != 1:
+                    raise NotImplementedError(
+                        "thought_prefix_only decode supports one token per step "
+                        "(multi-token verification is not implemented)."
+                    )
+                frozen_in     = kv_cache["_frozen_thoughts"]
+                e_summary     = e_thought = None
+                combined_mask = None
+            else:
+                if prefix_len is None:
+                    raise ValueError("cfg.thought_prefix_only=True requires prefix_len (B,) on every forward pass.")
+                e_summary     = _prefix_mean(e, prefix_len)                      # [B, D] — prompt only
+                e_thought     = e_summary.unsqueeze(1).expand_as(thoughts)
+                combined_mask = _anthos_prefix_mask(self.n_thought, T, prefix_len, h.device) if T > 1 else None
+                if kv_cache is not None:
+                    frozen_out = []
         else:
             e_summary     = e.mean(dim=1)                                        # [B, D] — cold-start conditioning for MemoryBank
             e_thought     = e.mean(dim=1, keepdim=True).expand_as(thoughts)
             combined_mask = _anthos_causal_mask(self.n_thought, T, h.device) if T > 1 else None
         moe_aux_total = h.new_zeros(1)
 
+        # With a cache in prefix mode every loop must run (no early exit) so each loop's
+        # cached K/V covers every position; decode steps then find them all.
+        run_all_loops = frozen_in is not None or frozen_out is not None
+
         for t in range(n_loops):
+            if frozen_in is not None:
+                if t >= len(frozen_in):
+                    raise ValueError(
+                        f"decode asked for loop {t} but prefill saved {len(frozen_in)} loops; "
+                        "use the same n_loops for prefill and decode."
+                    )
+                thoughts = frozen_in[t]
+            elif frozen_out is not None:
+                frozen_out.append(thoughts.detach())
+
             loop_emb       = self.loop_embeds[min(t, self.loop_embeds.shape[0] - 1)]
             h_combined     = self.h_pre_norm(h + loop_emb) + e_normed
             full_seq       = torch.cat([thoughts, h_combined], dim=1)
@@ -1273,9 +1325,10 @@ class AnthosRecurrentBlock(nn.Module):
             thought_out = full_out[:, :self.n_thought, :]
             seq_out     = full_out[:, self.n_thought:,  :]
 
-            thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
-            # MemoryBank read+write: thought tokens attend to persistent KV memory
-            thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
+            if frozen_in is None:
+                thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
+                # MemoryBank read+write: thought tokens attend to persistent KV memory
+                thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             p             = self.act(h)
@@ -1292,8 +1345,11 @@ class AnthosRecurrentBlock(nn.Module):
             halted       = halted       | (cumulative_p >= self.cfg.act_threshold)
             loops_used   = loops_used   + still_running.float()
 
-            if halted.all():
+            if halted.all() and not run_all_loops:
                 break
+
+        if frozen_out is not None:
+            kv_cache["_frozen_thoughts"] = frozen_out
 
         act_aux = loops_used.mean()  # differentiable ACT penalty
 
@@ -1608,7 +1664,9 @@ class Anthos(nn.Module):
                 ctx       = generated[:, -1:]
                 start_pos = generated.shape[1] - 1  # position of the new token
 
-            logits = self.forward(ctx, n_loops=n_loops, kv_cache=kv_cache, start_pos=start_pos)
+            # Prompt-only thoughts: the prompt is the whole input, thoughts are frozen after prefill.
+            extra  = {"prefix_len": input_ids.shape[1]} if self.cfg.thought_prefix_only else {}
+            logits = self.forward(ctx, n_loops=n_loops, kv_cache=kv_cache, start_pos=start_pos, **extra)
             logits = logits[:, -1, :] / temperature
 
             if top_k > 0:
