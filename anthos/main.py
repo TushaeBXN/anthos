@@ -146,6 +146,24 @@ class AnthosConfig:
     # Disable for inference (kv_cache path skips checkpointing automatically).
     gradient_checkpointing: bool = False
 
+    # Prompt-only thoughts (causality fix). With the default mask, thought tokens
+    # attend to the WHOLE sequence and every position attends to the thoughts, so
+    # information about later tokens reaches earlier positions. Training can use
+    # that channel; generation cannot (the future does not exist yet).
+    # thought_prefix_only=True restricts thoughts to the first `prefix_len`
+    # positions (the prompt), so every later position is strictly causal.
+    # Pass prefix_len to Anthos.forward. False (default) keeps the old behaviour
+    # exactly. Adds no parameters, so existing checkpoints load unchanged.
+    thought_prefix_only:   bool  = False
+
+    # MoE routing-weight pairing fix. The legacy dispatch multiplies each expert
+    # output by the router weight of a *different* token (expert-sorted weights
+    # applied to token-ordered outputs). True makes each token use its own weights,
+    # which is what the layer is meant to compute and makes it token-independent.
+    # False (default) reproduces the legacy maths exactly, so existing checkpoints
+    # behave as before. Enable together with thought_prefix_only for a causal model.
+    moe_fix_weight_order:  bool  = False
+
     # YaRN RoPE scaling: extend context beyond max_seq_len at inference time.
     # Set rope_scaling_type="yarn" and rope_scaling_factor > 1.0 to enable.
     # Example: trained at max_seq_len=4096, extend to 32k with factor=8.0.
@@ -352,6 +370,48 @@ def _anthos_causal_mask(n_thought: int, seq_len: int, device: torch.device) -> t
     )
     mask[0, 0, n_thought:, n_thought:] = causal
     return mask
+
+
+def _anthos_prefix_mask(
+    n_thought:  int,
+    seq_len:    int,
+    prefix_len: torch.Tensor,
+    device:     torch.device,
+) -> torch.Tensor:
+    """
+    Causal-safe variant of _anthos_causal_mask: thoughts only see the prompt.
+
+    Thought rows   → all thoughts + sequence columns j < prefix_len[b]
+    Sequence rows  → all thoughts + standard causal sequence attention
+
+    Because thoughts never see a position >= prefix_len, a response token can
+    only receive information from tokens at or before itself.
+
+    prefix_len: (B,) long tensor. Shape returned: (B, 1, N, N), N = n_thought + seq_len.
+    """
+    B     = prefix_len.shape[0]
+    total = n_thought + seq_len
+    mask  = torch.zeros(B, 1, total, total, device=device)
+
+    causal = torch.triu(
+        torch.full((seq_len, seq_len), float("-inf"), device=device),
+        diagonal=1,
+    )
+    mask[:, 0, n_thought:, n_thought:] = causal
+
+    cols    = torch.arange(seq_len, device=device).unsqueeze(0)          # (1, T)
+    blocked = cols >= prefix_len.to(device).unsqueeze(1)                 # (B, T)
+    thought_rows = mask[:, 0, :n_thought, n_thought:]                    # (B, n_thought, T) view
+    thought_rows.masked_fill_(blocked.unsqueeze(1), float("-inf"))
+    return mask
+
+
+def _prefix_mean(e: torch.Tensor, prefix_len: torch.Tensor) -> torch.Tensor:
+    """Mean of e over the first prefix_len[b] positions → (B, D); zeros if prefix_len is 0."""
+    B, T, _ = e.shape
+    keep  = (torch.arange(T, device=e.device).unsqueeze(0) < prefix_len.to(e.device).unsqueeze(1)).to(e.dtype)
+    denom = keep.sum(dim=1, keepdim=True).clamp(min=1.0)
+    return (e * keep.unsqueeze(-1)).sum(dim=1) / denom
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -662,6 +722,7 @@ class MoEFFN(nn.Module):
         self.router = nn.Linear(cfg.dim, cfg.n_experts, bias=False)
         self.register_buffer("router_bias", torch.zeros(cfg.n_experts))
         self._use_expert_choice = cfg.use_expert_choice
+        self._fix_weight_order  = cfg.moe_fix_weight_order
 
         self.routed_experts = nn.ModuleList(
             [Expert(cfg.dim, cfg.expert_dim) for _ in range(cfg.n_experts)]
@@ -739,7 +800,12 @@ class MoEFFN(nn.Module):
 
         output_unsorted = torch.empty_like(output_sorted)
         output_unsorted[sort_idx] = output_sorted
-        out = (output_unsorted * weights_sorted).view(N, self.topk, D).sum(1)
+        # output_unsorted is back in token-major order, so it must be paired with the
+        # token-major weights_exp. weights_sorted is in expert-sorted order; using it
+        # here (the legacy behaviour) hands each token another token's router weight,
+        # which makes the layer depend on other tokens, including later ones.
+        w   = weights_exp if self._fix_weight_order else weights_sorted
+        out = (output_unsorted * w).view(N, self.topk, D).sum(1)
 
         # Load-balancing aux loss — differentiable, returned directly (no buffer)
         importance = scores.mean(0)
@@ -1144,8 +1210,12 @@ class AnthosRecurrentBlock(nn.Module):
         n_loops:         Optional[int]              = None,
         kv_cache:        Optional[dict]             = None,
         memory_state:    Optional[MemoryBankState]  = None,
+        prefix_len:      Optional[torch.Tensor]     = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, MemoryBankState, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (h_out, moe_aux_total, act_aux, memory_state, loops_used, prerouter_aux, halt_probs).
+
+        prefix_len: (B,) long tensor, only used when cfg.thought_prefix_only is True —
+                    thoughts (and the e summaries) see only the first prefix_len positions.
 
         halt_probs: (B, T, max_loop_iters) — per-position halting probability at each loop step;
                     zero for steps that did not execute (early termination or already halted).
@@ -1161,9 +1231,21 @@ class AnthosRecurrentBlock(nn.Module):
         halt_probs   = torch.zeros(B, T, n_loops, device=h.device)  # (B, T, max_loop_iters)
 
         e_normed      = self.e_norm(e)
-        e_summary     = e.mean(dim=1)                                        # [B, D] — cold-start conditioning for MemoryBank
-        e_thought     = e.mean(dim=1, keepdim=True).expand_as(thoughts)
-        combined_mask = _anthos_causal_mask(self.n_thought, T, h.device) if T > 1 else None
+        if self.cfg.thought_prefix_only:
+            if prefix_len is None:
+                raise ValueError("cfg.thought_prefix_only=True requires prefix_len (B,) on every forward pass.")
+            if kv_cache is not None and T == 1:
+                raise NotImplementedError(
+                    "thought_prefix_only decode needs thoughts frozen after prefill; "
+                    "this is not implemented yet. Use full forward passes for now."
+                )
+            e_summary     = _prefix_mean(e, prefix_len)                          # [B, D] — prompt only
+            e_thought     = e_summary.unsqueeze(1).expand_as(thoughts)
+            combined_mask = _anthos_prefix_mask(self.n_thought, T, prefix_len, h.device) if T > 1 else None
+        else:
+            e_summary     = e.mean(dim=1)                                        # [B, D] — cold-start conditioning for MemoryBank
+            e_thought     = e.mean(dim=1, keepdim=True).expand_as(thoughts)
+            combined_mask = _anthos_causal_mask(self.n_thought, T, h.device) if T > 1 else None
         moe_aux_total = h.new_zeros(1)
 
         for t in range(n_loops):
@@ -1263,6 +1345,13 @@ class Anthos(nn.Module):
     def __init__(self, cfg: AnthosConfig, vision_cfg: Optional["VisionConfig"] = None):
         super().__init__()
         self.cfg = cfg
+
+        if cfg.thought_prefix_only and (cfg.use_expert_choice or cfg.use_mod):
+            raise ValueError(
+                "thought_prefix_only promises a causal model, but use_expert_choice and "
+                "use_mod pick tokens across the whole sequence and break causality. "
+                "Turn them off, or turn thought_prefix_only off."
+            )
 
         self.embed       = nn.Embedding(cfg.vocab_size, cfg.dim)
         self.thought_pool = ThoughtTokenPool(cfg.n_thought_tokens, cfg.dim)
@@ -1371,8 +1460,13 @@ class Anthos(nn.Module):
         memory_state: Optional[MemoryBankState] = None,
         start_pos:    int                       = 0,
         pixel_values: Optional[torch.Tensor]    = None,
+        prefix_len:   Optional[object]          = None,
     ):
         """
+        prefix_len — int or (B,) long tensor: number of leading prompt tokens that
+                     thoughts may read. Only used when cfg.thought_prefix_only is
+                     True (image patches, if any, are counted automatically).
+
         Args:
             input_ids    — (B, T) token indices
             n_loops      — recurrent depth (defaults to cfg.max_loop_iters)
@@ -1407,6 +1501,14 @@ class Anthos(nn.Module):
             vis_embeds = self.vision_encoder(pixel_values)   # (B, n_patches, dim)
             x = torch.cat([vis_embeds, x], dim=1)             # prepend image tokens
             T = x.shape[1]                                    # extend effective sequence length
+            n_patches = vis_embeds.shape[1]
+        else:
+            n_patches = 0
+
+        if prefix_len is not None:
+            if not torch.is_tensor(prefix_len):
+                prefix_len = torch.full((B,), int(prefix_len), dtype=torch.long, device=device)
+            prefix_len = prefix_len.to(device) + n_patches
 
         use_mla         = (self.cfg.attn_type == "mla")
         freqs_cis       = self._get_rope_freqs(T + start_pos, use_mla=use_mla)[start_pos:]
@@ -1423,7 +1525,8 @@ class Anthos(nn.Module):
         e        = x
         thoughts = self.thought_pool.init_batch(B, device)
         x, moe_aux, act_aux, memory_state, loops_used, prerouter_aux, halt_probs = self.recurrent(
-            x, thoughts, e, freqs_cis, thought_freqs_0, n_loops, kv_cache, memory_state
+            x, thoughts, e, freqs_cis, thought_freqs_0, n_loops, kv_cache, memory_state,
+            prefix_len=prefix_len,
         )
         self._last_memory_state  = memory_state    # expose for stateful inference wrappers
         self._last_loops_used    = loops_used      # expose for EAFT loss weighting
