@@ -228,6 +228,11 @@ def train(
     spike_rollback: bool = False,
     spike_factor: float = 4.0,
     thought_prefix_only: bool = False,
+    data_path: str | None = None,
+    seed: int | None = None,
+    run_name: str | None = None,
+    lr: float | None = None,
+    warmup: int | None = None,
 ):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
@@ -236,6 +241,14 @@ def train(
     is_distributed = world_size > 1
 
     model_cfg, train_cfg = get_training_config(tier)
+    if run_name:
+        train_cfg.run_name = run_name   # keeps paired runs in separate checkpoint folders
+    if seed is not None:
+        # Paired experiments (e.g. legacy vs causal mode) need identical init and data order.
+        import random as _random
+        _random.seed(seed); torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
     if torch.cuda.is_available():
         device = f"cuda:{local_rank}"
         torch.cuda.set_device(local_rank)
@@ -304,6 +317,10 @@ def train(
     # ── CLI override (always applied last) ───────────────────────────────────
     if max_steps is not None:
         MAX_STEPS = max_steps
+    if lr is not None:           # the sft/instruct tiers assume a pretrained start (3e-5); from scratch needs more
+        MAX_LR, MIN_LR = lr, lr / 10
+    if warmup is not None:
+        WARMUP_STEPS = warmup
 
     if gradient_checkpointing:
         model_cfg.gradient_checkpointing = True
@@ -571,7 +588,7 @@ def train(
             print(f"  ✓ Code tier: loading {local_data}")
         elif tier == "sft" or tier == "instruct":
             # Use whatever data path configs.py resolved (sft_master.jsonl first)
-            local_data = train_cfg.dataset
+            local_data = data_path or train_cfg.dataset
             if Path(local_data).exists():
                 dataset_name = local_data
                 max_samples  = 0
@@ -595,6 +612,11 @@ def train(
         else:
             max_samples  = 0
             dataset_name = "Open-Orca/SlimOrca"
+
+        if data_path:
+            dataset_name = data_path
+            max_samples  = 0
+            print(f"  ✓ --data override: {data_path}")
 
         n_workers = 0 if tier in ("convo_smoke", "identity_hardening", "code") else 1
         loader = get_chat_dataloader(
@@ -912,6 +934,14 @@ if __name__ == "__main__":
                         help="Curriculum learning: ramp seq len from SEQ_LEN/8 → SEQ_LEN over first 10%% of steps")
     parser.add_argument("--spike-rollback", action="store_true", dest="spike_rollback",
                         help="Auto-rollback to last checkpoint when loss spikes > spike-factor × EMA")
+    parser.add_argument("--data", type=str, default=None, dest="data_path",
+                        help="ShareGPT .jsonl for chat tiers (overrides the tier's default data)")
+    parser.add_argument("--run-name", type=str, default=None, dest="run_name",
+                        help="Checkpoint folder name under checkpoints/ (default: the tier's name)")
+    parser.add_argument("--lr", type=float, default=None, help="Peak learning rate (min = lr/10); overrides the tier")
+    parser.add_argument("--warmup", type=int, default=None, help="Warmup steps; overrides the tier")
+    parser.add_argument("--seed", type=int, default=None,
+                        help="Seed python/torch RNGs (use the same seed for paired runs)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
                         help="Causal mode: thoughts read only the prompt + MoE weight-order fix. "
                              "Use with chat tiers (sft, convo_smoke, identity_hardening, code). "
@@ -934,4 +964,9 @@ if __name__ == "__main__":
         spike_rollback          = args.spike_rollback,
         spike_factor            = args.spike_factor,
         thought_prefix_only     = args.thought_prefix_only,
+        data_path               = args.data_path,
+        seed                    = args.seed,
+        run_name                = args.run_name,
+        lr                      = args.lr,
+        warmup                  = args.warmup,
     )
