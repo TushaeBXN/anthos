@@ -64,10 +64,27 @@ corrected alignment is only used when `thought_prefix_only=True`. Turning it on 
 one-line change (`self.attn.fix_cached_causal = True` in `TransformerBlock`) but changes generation
 for existing checkpoints, so it is left as your call.
 
+## Training with it
+
+```bash
+python3 train.py --tier convo_smoke --thought-prefix-only --resume <checkpoint>
+```
+
+- `--thought-prefix-only` turns on `thought_prefix_only` and `moe_fix_weight_order` for the run.
+- The chat loader (`get_chat_dataloader(..., return_prefix_len=True)`, which `train.py` sets for you)
+  yields `(input_ids, labels, prefix_len)`; `prefix_len` is the prompt length (system + user + thought
+  block, i.e. everything before the first learned label). Default loaders still return two items.
+- Tiers without a prompt/response split (pretraining-style, distill) pass `prefix_len=0`, so thoughts
+  read nothing; use the flag with the chat tiers (`sft`, `convo_smoke`, `identity_hardening`, `code`).
+- A `causal_mode.json` marker is written into the run's checkpoint folder. Resuming a legacy checkpoint
+  in causal mode (or the reverse) prints a `MODE MISMATCH` warning, because the flags add no
+  parameters and the weights would otherwise load silently and behave differently.
+- Verified: loader -> model contract and causality after the prompt (`tests/test_prefix_len_pipeline.py`,
+  stub tokenizer). **Not verified:** a real `train.py` run, since this machine's Python has no
+  `transformers` / `datasets`; do a short `--steps 20` run first.
+
 ## Not done yet
 
-- **Training loop wiring.** `train.py` / the chat dataloader must pass `prefix_len` (prompt length per
-  example); pretraining-style tiers can pass 0.
 - **SpecDecoder** (`anthos/spec_decode.py`) calls the model without `prefix_len` and verifies with
   uncached full passes, so it does not work in prefix mode yet. (It also resamples rejected tokens
   from `v_probs - softmax(zeros)` rather than `v_probs - draft_probs`; worth a look.)

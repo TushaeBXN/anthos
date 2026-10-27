@@ -405,8 +405,10 @@ class ChatInstructDataset(IterableDataset):
         split:          str  = "train",
         max_samples:    int  = 0,    # 0 = use full dataset; N = stop after N conversations
         dataset_name:   str  = "Open-Orca/SlimOrca",  # swap to any ShareGPT-format dataset
+        return_prefix_len: bool = False,   # also yield the prompt length (for thought_prefix_only)
     ):
         super().__init__()
+        self.return_prefix_len = return_prefix_len
         self.seq_len      = seq_len
         self.mask_prompt  = mask_prompt
         self.split        = split
@@ -498,10 +500,16 @@ class ChatInstructDataset(IterableDataset):
             if len(input_ids) < 4:
                 continue
 
-            yield (
+            item = (
                 torch.tensor(input_ids, dtype=torch.long),
                 torch.tensor(labels,    dtype=torch.long),
             )
+            if self.return_prefix_len:
+                # Prompt = everything before the first learned (non -100) label, i.e. the
+                # system/user/thought block. Thoughts may read these positions only.
+                prompt_len = next((i for i, l in enumerate(labels) if l != -100), len(labels))
+                item = item + (torch.tensor(prompt_len, dtype=torch.long),)
+            yield item
 
             n_seen += 1
             if self.max_samples and n_seen >= self.max_samples:
@@ -521,10 +529,14 @@ def get_chat_dataloader(
     split:          str  = "train",
     max_samples:    int  = 0,       # 0 = full dataset; N = CPU-friendly slice
     dataset_name:   str  = "Open-Orca/SlimOrca",
+    return_prefix_len: bool = False,
 ) -> DataLoader:
     """
     Returns a DataLoader for chat SFT (ShareGPT format).
     Batches are (input_ids, labels) with prompt tokens masked to -100.
+    With return_prefix_len=True batches are (input_ids, labels, prefix_len), where
+    prefix_len is a (B,) tensor holding each example's prompt length — pass it to
+    Anthos.forward when cfg.thought_prefix_only is on.
 
     Run setup_tokenizer.py once before using this loader.
     Set max_samples=5000 and dataset_name="mlabonne/FineTome-100k" for convo_smoke.
@@ -535,6 +547,7 @@ def get_chat_dataloader(
         split          = split,
         max_samples    = max_samples,
         dataset_name   = dataset_name,
+        return_prefix_len = return_prefix_len,
     )
 
     def collate(batch):
@@ -549,6 +562,8 @@ def get_chat_dataloader(
             padded_tokens[i, :t.size(0)] = t
             padded_labels[i, :l.size(0)] = l
 
+        if return_prefix_len:
+            return padded_tokens, padded_labels, torch.stack([b[2] for b in batch])
         return padded_tokens, padded_labels
 
     return DataLoader(

@@ -227,6 +227,7 @@ def train(
     curriculum: bool = False,
     spike_rollback: bool = False,
     spike_factor: float = 4.0,
+    thought_prefix_only: bool = False,
 ):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
@@ -306,6 +307,28 @@ def train(
 
     if gradient_checkpointing:
         model_cfg.gradient_checkpointing = True
+
+    # Causal mode: thoughts read only the prompt and MoE routing weights stay with their own
+    # token (see docs/CAUSALITY_FIX.md). Needs prefix_len, which the chat loader supplies.
+    if thought_prefix_only:
+        model_cfg.thought_prefix_only  = True
+        model_cfg.moe_fix_weight_order = True
+
+    # Mark the run directory so a causal-mode checkpoint is never resumed (or a legacy one
+    # continued) in the wrong mode without a warning. The flags add no parameters, so a
+    # mismatch would otherwise load silently and just behave differently.
+    import json as _json
+    if resume:
+        _marker = Path(resume).parent / "causal_mode.json"
+        _was_causal = _marker.exists() and _json.loads(_marker.read_text()).get("thought_prefix_only", False)
+        if bool(_was_causal) != bool(thought_prefix_only):
+            print(f"  ⚠ MODE MISMATCH: resuming {'causal' if _was_causal else 'legacy'} checkpoint "
+                  f"{resume} in {'causal' if thought_prefix_only else 'legacy'} mode — expect a loss jump.",
+                  flush=True)
+    if thought_prefix_only and is_main_process():
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        (ckpt_dir / "causal_mode.json").write_text(_json.dumps(
+            {"thought_prefix_only": True, "moe_fix_weight_order": True}) + "\n")
 
     # ── Flash Attention 2 backend selection ──────────────────────────────────
     # F.scaled_dot_product_attention (already used in GQAttention/MLAttention)
@@ -581,6 +604,7 @@ def train(
             tokenizer_path = tok_path,
             max_samples    = max_samples,
             dataset_name   = dataset_name,
+            return_prefix_len = thought_prefix_only,
         )
     else:
         loader = get_dataloader(
@@ -682,12 +706,19 @@ def train(
                 input_ids_in = batch[:, :_eff_seq-1]
                 labels       = batch[:, 1:_eff_seq]
 
+            prefix_kw = {}
+            if thought_prefix_only:
+                if is_sft:
+                    prefix_kw["prefix_len"] = batch[2].to(device).clamp(max=_eff_seq)
+                else:
+                    prefix_kw["prefix_len"] = 0   # no prompt/response split: thoughts read nothing
+
             _autocast = (
                 torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16)
                 if device == "cuda" else nullcontext()
             )
             with _autocast:
-                logits, aux = model(input_ids_in, n_loops=n_loops, return_aux=True)
+                logits, aux = model(input_ids_in, n_loops=n_loops, return_aux=True, **prefix_kw)
 
                 if is_distill:
                     t_log = teacher_logits[:, :-1, :]
@@ -881,6 +912,10 @@ if __name__ == "__main__":
                         help="Curriculum learning: ramp seq len from SEQ_LEN/8 → SEQ_LEN over first 10%% of steps")
     parser.add_argument("--spike-rollback", action="store_true", dest="spike_rollback",
                         help="Auto-rollback to last checkpoint when loss spikes > spike-factor × EMA")
+    parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
+                        help="Causal mode: thoughts read only the prompt + MoE weight-order fix. "
+                             "Use with chat tiers (sft, convo_smoke, identity_hardening, code). "
+                             "See docs/CAUSALITY_FIX.md")
     parser.add_argument("--spike-factor", type=float, default=4.0,
                         help="Loss spike threshold multiplier (default: 4.0)")
     args = parser.parse_args()
@@ -898,4 +933,5 @@ if __name__ == "__main__":
         curriculum              = args.curriculum,
         spike_rollback          = args.spike_rollback,
         spike_factor            = args.spike_factor,
+        thought_prefix_only     = args.thought_prefix_only,
     )
