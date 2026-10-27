@@ -7,9 +7,16 @@ the old leak flattered earlier results. Nothing here has been run yet; this is t
 
 - Tooling on this branch: `--thought-prefix-only`, `--data`, `--seed`, `--run-name`, `--lr`, `--warmup`
   in `train.py`; `eval_leak_gap.py`; `make_baseline_data.py`.
-- **Not on the dev Mac:** the earlier Haiku teacher data, any past checkpoints, `data/anthos_tokenizer`
-  was only in the old checkout. Past runs therefore cannot be reproduced here, so the comparison below is
-  between two *new* runs on free public data. It is a paired experiment, not a re-run of history.
+- **Older checkpoints do exist on the dev Mac** (`/Users/anthosintelligence/anthos/checkpoints/`): `anthos-proof`
+  step 1000 and 2000 (73.6M incl. buffers, recorded loss ~1.57-1.61; step 3000 is marked `.collapsed`),
+  `anthos-rl-001`, `smoke/identity_hardening_*`. The Haiku teacher data and `data/*.jsonl` are not there.
+- **They could not be used as the legacy baseline.** `anthos-proof` loads cleanly into current code
+  (only the new prerouter head is missing) but does not reproduce its recorded loss: teacher-forced loss on
+  children's-story text is ~10 (uniform = 10.8) and greedy samples are "the the by by ,,,,". The same
+  happens with the model code as of the checkpoint's save date, so it is not code drift. Likely causes:
+  out-of-distribution test text, an unrecorded training setup, or a degraded checkpoint (the step-3000 file
+  is marked collapsed and the recorded loss rises 1.57 -> 1.61). Unresolved; testing on the checkpoint's own
+  training data would settle it. Hence the fresh paired runs below.
 
 ## Design (paired, controlled)
 
