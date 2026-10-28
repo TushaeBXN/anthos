@@ -98,6 +98,8 @@ def main():
     ap.add_argument("--data", required=True, help="held-out ShareGPT jsonl")
     ap.add_argument("--tokenizer", default="data/anthos_tokenizer")
     ap.add_argument("--thought-prefix-only", action="store_true", dest="causal")
+    ap.add_argument("--n-thoughts", type=int, default=None, help="control models: thought-token count used in training")
+    ap.add_argument("--max-loops", type=int, default=None, help="control models: max loop iterations used in training")
     ap.add_argument("--n-loops", type=int, default=None, help="default: the tier's phase-2 loop count")
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--max-examples", type=int, default=200)
@@ -106,6 +108,10 @@ def main():
 
     from anthos.configs import get_training_config
     model_cfg, train_cfg = get_training_config(args.tier)
+    if args.n_thoughts is not None:
+        model_cfg.n_thought_tokens = args.n_thoughts
+    if args.max_loops is not None:
+        model_cfg.max_loop_iters = args.max_loops
     if args.causal:
         model_cfg.thought_prefix_only = True
         model_cfg.moe_fix_weight_order = True
@@ -115,7 +121,7 @@ def main():
     missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
     if missing or unexpected:
         print(f"  note: {len(missing)} missing / {len(unexpected)} unexpected tensors when loading", file=sys.stderr)
-    n_loops = args.n_loops or getattr(train_cfg, "phase2_loops", model_cfg.max_loop_iters)
+    n_loops = min(args.n_loops or getattr(train_cfg, "phase2_loops", model_cfg.max_loop_iters), model_cfg.max_loop_iters)
 
     examples = load_examples(args.data, args.tokenizer, args.seq_len, args.max_examples)
     res = leak_gap(model, examples, n_loops, args.causal)
