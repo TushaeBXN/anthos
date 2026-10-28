@@ -228,6 +228,8 @@ def train(
     spike_rollback: bool = False,
     spike_factor: float = 4.0,
     thought_prefix_only: bool = False,
+    n_thoughts: int | None = None,
+    max_loops: int | None = None,
     data_path: str | None = None,
     seed: int | None = None,
     run_name: str | None = None,
@@ -327,6 +329,12 @@ def train(
 
     # Causal mode: thoughts read only the prompt and MoE routing weights stay with their own
     # token (see docs/CAUSALITY_FIX.md). Needs prefix_len, which the chat loader supplies.
+    # Control models: --n-thoughts 0 drops the thought stream; --max-loops 1 on top gives a plain transformer.
+    if n_thoughts is not None:
+        model_cfg.n_thought_tokens = n_thoughts
+    if max_loops is not None:
+        model_cfg.max_loop_iters = max_loops
+
     if thought_prefix_only:
         model_cfg.thought_prefix_only  = True
         model_cfg.moe_fix_weight_order = True
@@ -694,7 +702,7 @@ def train(
     while step < MAX_STEPS:
         lr     = get_lr(step)
         for pg in optimizer.param_groups: pg["lr"] = lr
-        n_loops = get_n_loops(step)
+        n_loops = min(get_n_loops(step), model_cfg.max_loop_iters)
 
         # Curriculum: linearly ramp effective seq len from _curr_start_len → _curriculum_target_seq
         if curriculum:
@@ -764,7 +772,7 @@ def train(
                     # before reshape. Raw activations can be any size depending on
                     # batch/seq combinations; the view requires exact divisibility.
                     chunk = n_thought * model_cfg.dim
-                    if thought_acts.shape[0] >= chunk:
+                    if chunk > 0 and thought_acts.shape[0] >= chunk:   # chunk == 0: control model without thoughts
                         trimmed = thought_acts[: (thought_acts.shape[0] // chunk) * chunk]
                         div_pen = div_loss_fn(
                             trimmed.view(-1, n_thought, model_cfg.dim)
@@ -943,6 +951,10 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=None, help="Warmup steps; overrides the tier")
     parser.add_argument("--seed", type=int, default=None,
                         help="Seed python/torch RNGs (use the same seed for paired runs)")
+    parser.add_argument("--n-thoughts", type=int, default=None, dest="n_thoughts",
+                        help="Override the number of thought tokens (0 = control model without thoughts)")
+    parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
+                        help="Override max loop iterations (1 with --n-thoughts 0 = plain transformer control)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
                         help="Causal mode: thoughts read only the prompt + MoE weight-order fix. "
                              "Use with chat tiers (sft, convo_smoke, identity_hardening, code). "
@@ -965,6 +977,8 @@ if __name__ == "__main__":
         spike_rollback          = args.spike_rollback,
         spike_factor            = args.spike_factor,
         thought_prefix_only     = args.thought_prefix_only,
+        n_thoughts              = args.n_thoughts,
+        max_loops               = args.max_loops,
         data_path               = args.data_path,
         seed                    = args.seed,
         run_name                = args.run_name,

@@ -1164,6 +1164,8 @@ class PreRouterHead(nn.Module):
 
     def forward(self, thoughts: torch.Tensor) -> torch.Tensor:
         """thoughts: (B, n_thought, dim) → (B, n_experts) expert-selection logits"""
+        if thoughts.shape[1] == 0:   # no-thoughts control model
+            return thoughts.new_zeros(thoughts.shape[0], self.proj[-1].out_features)
         return self.proj(thoughts.mean(dim=1))
 
 
@@ -1346,7 +1348,8 @@ class AnthosRecurrentBlock(nn.Module):
             if frozen_in is None:
                 thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
                 # MemoryBank read+write: thought tokens attend to persistent KV memory
-                thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
+                if self.n_thought > 0:   # n_thought == 0 is the no-thoughts control model
+                    thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             p             = self.act(h)
