@@ -109,6 +109,25 @@ def check_moe_collapse(model, model_cfg, step: int) -> float:
     except Exception:
         return 0.0
 
+def routing_halting_stats(model, model_cfg):
+    """Routing entropy (0..1, 1 = uniform over experts) and per-loop mean ACT halt prob from the last forward pass."""
+    entropy, halt = 0.0, []
+    try:
+        topk_idx = model.recurrent.block.ffn._last_topk_idx
+        if topk_idx is not None:
+            counts = torch.bincount(topk_idx.reshape(-1), minlength=model_cfg.n_experts).float()
+            p = counts / counts.sum()
+            entropy = (-(p * torch.log(p.clamp_min(1e-9))).sum() / math.log(model_cfg.n_experts)).item()
+    except Exception:
+        pass
+    try:
+        hp = model.halt_probs
+        if hp is not None:
+            halt = [round(v, 3) for v in hp.detach().float().mean(dim=(0, 1)).tolist()]
+    except Exception:
+        pass
+    return entropy, halt
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Logic Functions
 # ─────────────────────────────────────────────────────────────────────────────
@@ -233,6 +252,10 @@ def train(
     vocab_size: int | None = None,
     pretrain_prefix_max: int = 128,
     max_loops: int | None = None,
+    batch_size: int | None = None,
+    grad_accum: int | None = None,
+    log_every: int | None = None,
+    save_every: int | None = None,
     data_path: str | None = None,
     seed: int | None = None,
     run_name: str | None = None,
@@ -326,6 +349,10 @@ def train(
         MAX_LR, MIN_LR = lr, lr / 10
     if warmup is not None:
         WARMUP_STEPS = warmup
+    if log_every is not None:
+        LOG_EVERY = log_every
+    if save_every is not None:
+        SAVE_EVERY = save_every
 
     if gradient_checkpointing:
         model_cfg.gradient_checkpointing = True
@@ -340,6 +367,10 @@ def train(
         model_cfg.n_thought_tokens = n_thoughts
     if max_loops is not None:
         model_cfg.max_loop_iters = max_loops
+    if batch_size is not None:
+        train_cfg.batch_size = batch_size
+    if grad_accum is not None:
+        train_cfg.grad_accum = grad_accum
 
     if thought_prefix_only:
         model_cfg.thought_prefix_only  = True
@@ -855,14 +886,22 @@ def train(
             tok_sec = (LOG_EVERY * train_cfg.batch_size * train_cfg.grad_accum
                        * _eff_seq * world_size) / (t1 - t0)
             top1_frac = check_moe_collapse(unwrap_model(model), model_cfg, step)
+            route_entropy, halt_by_loop = routing_halting_stats(unwrap_model(model), model_cfg)
             _curr_info = f" | seq {_eff_seq}" if curriculum else ""
             print(
                 f"step {step:6d} | loss {avg_loss:.4f} | aux {avg_aux:.5f} | "
                 f"prerouter_kl {avg_prerouter:.4f} | gnorm {avg_gnorm:.3f} | "
-                f"moe_top1 {top1_frac:.1%} | loops {n_loops} | lr {lr:.2e}"
+                f"moe_top1 {top1_frac:.1%} | route_H {route_entropy:.3f} | loops {n_loops} | lr {lr:.2e}"
                 f"{_curr_info} | {tok_sec:,.0f} tok/s",
                 flush=True,
             )
+            print(f"         halt_by_loop {halt_by_loop}", flush=True)
+            with open(ckpt_dir / "metrics.jsonl", "a") as _mf:
+                _mf.write(json.dumps({
+                    "step": step, "loss": avg_loss, "aux": avg_aux, "prerouter_kl": avg_prerouter,
+                    "gnorm": avg_gnorm, "moe_top1": top1_frac, "route_entropy": route_entropy,
+                    "halt_by_loop": halt_by_loop, "n_loops": n_loops, "lr": lr, "tok_per_sec": tok_sec,
+                }) + "\n")
 
             # ── wandb logging ─────────────────────────────────────────────────
             if _wandb_run is not None:
@@ -872,6 +911,7 @@ def train(
                     "prerouter_kl":  avg_prerouter,
                     "grad_norm":     avg_gnorm,
                     "moe_top1":      top1_frac,
+                    "route_entropy": route_entropy,
                     "lr":            lr,
                     "n_loops":       n_loops,
                     "tok_per_sec":   tok_sec,
@@ -978,6 +1018,10 @@ if __name__ == "__main__":
                         help="Causal pretraining: thoughts read a random prefix of 8..N tokens")
     parser.add_argument("--n-thoughts", type=int, default=None, dest="n_thoughts",
                         help="Override the number of thought tokens (0 = control model without thoughts)")
+    parser.add_argument("--batch-size", type=int, default=None, dest="batch_size")
+    parser.add_argument("--grad-accum", type=int, default=None, dest="grad_accum")
+    parser.add_argument("--log-every", type=int, default=None, dest="log_every")
+    parser.add_argument("--save-every", type=int, default=None, dest="save_every")
     parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
                         help="Override max loop iterations (1 with --n-thoughts 0 = plain transformer control)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
@@ -1007,6 +1051,10 @@ if __name__ == "__main__":
         vocab_size              = args.vocab_size,
         pretrain_prefix_max     = args.pretrain_prefix_max,
         max_loops               = args.max_loops,
+        batch_size              = args.batch_size,
+        grad_accum              = args.grad_accum,
+        log_every               = args.log_every,
+        save_every              = args.save_every,
         data_path               = args.data_path,
         seed                    = args.seed,
         run_name                = args.run_name,
