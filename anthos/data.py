@@ -521,6 +521,48 @@ class ChatInstructDataset(IterableDataset):
         return 517_982   # SlimOrca size
 
 
+class BinPackedDataset(IterableDataset):
+    """
+    Random windows from pre-tokenised uint16 shards (see make_pretrain_data.py).
+
+    Yields (seq_len+1,) tensors forever. Each DataLoader worker draws from its own seeded
+    stream, so workers never replay each other's windows.
+    """
+
+    def __init__(self, path: str, seq_len: int, seed: int = 0, pattern: str = "train_*.bin"):
+        super().__init__()
+        from pathlib import Path
+        self.files = sorted(Path(path).glob(pattern))
+        if not self.files:
+            raise FileNotFoundError(f"no {pattern} shards in {path} — run make_pretrain_data.py")
+        self.seq_len = seq_len
+        self.seed    = seed
+
+    def __iter__(self) -> Iterator[torch.Tensor]:
+        import numpy as np
+        info = torch.utils.data.get_worker_info()
+        rng  = np.random.default_rng([self.seed, info.id if info else 0])
+        meta = self.files[0].parent / "meta.json"
+        dt   = np.dtype(__import__("json").loads(meta.read_text()).get("dtype", "uint16")) if meta.exists() else np.uint16
+        maps = [np.memmap(f, dtype=dt, mode="r") for f in self.files]
+        sizes = np.array([len(m) - self.seq_len - 1 for m in maps], dtype=np.float64)
+        if (sizes <= 0).any():
+            raise ValueError("a shard is shorter than seq_len + 1")
+        probs = sizes / sizes.sum()
+        while True:
+            k   = rng.choice(len(maps), p=probs)
+            off = int(rng.integers(0, sizes[k]))
+            yield torch.from_numpy(maps[k][off:off + self.seq_len + 1].astype(np.int64))
+
+    def __len__(self):
+        return 10_000_000
+
+
+def get_bin_dataloader(path: str, seq_len: int, batch_size: int, num_workers: int = 1, seed: int = 0) -> DataLoader:
+    return DataLoader(BinPackedDataset(path, seq_len, seed), batch_size=batch_size,
+                      num_workers=num_workers, pin_memory=True)
+
+
 def next_token_pair(input_ids: torch.Tensor, labels: torch.Tensor):
     """Align (B, T) ids/labels for next-token prediction: position i predicts token i+1.
     Labels from the SFT datasets are unshifted, so both tensors must be offset here."""

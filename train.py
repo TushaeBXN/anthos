@@ -42,7 +42,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from anthos.main    import Anthos
 from anthos.configs import get_training_config
-from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader, get_markdown_dataloader, next_token_pair
+from anthos.data    import get_dataloader, get_instruct_dataloader, get_chat_dataloader, get_markdown_dataloader, next_token_pair, get_bin_dataloader
 from anthos.sasft         import RepetitionPenaltyLoss, ThoughtDiversityLoss
 from anthos.steering      import ActivationCollector
 from anthos.memory_compress import MemoryAugmentedDataset
@@ -229,6 +229,9 @@ def train(
     spike_factor: float = 4.0,
     thought_prefix_only: bool = False,
     n_thoughts: int | None = None,
+    pretrain_data: str | None = None,
+    vocab_size: int | None = None,
+    pretrain_prefix_max: int = 128,
     max_loops: int | None = None,
     data_path: str | None = None,
     seed: int | None = None,
@@ -329,6 +332,9 @@ def train(
 
     # Causal mode: thoughts read only the prompt and MoE routing weights stay with their own
     # token (see docs/CAUSALITY_FIX.md). Needs prefix_len, which the chat loader supplies.
+    if vocab_size is not None:     # e.g. 100352 for cl100k_base + chat specials, padded to a multiple of 128
+        model_cfg.vocab_size = vocab_size
+
     # Control models: --n-thoughts 0 drops the thought stream; --max-loops 1 on top gives a plain transformer.
     if n_thoughts is not None:
         model_cfg.n_thought_tokens = n_thoughts
@@ -636,6 +642,10 @@ def train(
             dataset_name   = dataset_name,
             return_prefix_len = thought_prefix_only,
         )
+    elif pretrain_data:
+        loader = get_bin_dataloader(pretrain_data, SEQ_LEN, train_cfg.batch_size,
+                                    num_workers=1, seed=seed or 0)
+        print(f"  ✓ Pretraining from pre-tokenised shards: {pretrain_data}")
     else:
         loader = get_dataloader(
             dataset_name = train_cfg.dataset,
@@ -741,6 +751,15 @@ def train(
             if thought_prefix_only:
                 if is_sft:
                     prefix_kw["prefix_len"] = batch[2].to(device).clamp(max=_eff_seq)
+                elif pretrain_data:
+                    # No prompt in plain text, so draw one: thoughts read the first p tokens and the loss
+                    # skips positions before p - 1 (those would see later prefix tokens through the thoughts).
+                    _L = input_ids_in.shape[1]
+                    _p = torch.randint(min(8, _L - 1), min(pretrain_prefix_max, _L - 1) + 1,
+                                       (input_ids_in.shape[0],), device=device)
+                    prefix_kw["prefix_len"] = _p
+                    labels = labels.clone()
+                    labels[torch.arange(_L, device=device)[None, :] < (_p[:, None] - 1)] = -100
                 else:
                     prefix_kw["prefix_len"] = 0   # no prompt/response split: thoughts read nothing
 
@@ -951,6 +970,12 @@ if __name__ == "__main__":
     parser.add_argument("--warmup", type=int, default=None, help="Warmup steps; overrides the tier")
     parser.add_argument("--seed", type=int, default=None,
                         help="Seed python/torch RNGs (use the same seed for paired runs)")
+    parser.add_argument("--vocab-size", type=int, default=None, dest="vocab_size",
+                        help="Override the tier's vocabulary size (must match the tokenizer used for the data)")
+    parser.add_argument("--pretrain-data", default=None, dest="pretrain_data",
+                        help="Directory of shards from make_pretrain_data.py (non-SFT tiers, e.g. --tier proof)")
+    parser.add_argument("--pretrain-prefix-max", type=int, default=128, dest="pretrain_prefix_max",
+                        help="Causal pretraining: thoughts read a random prefix of 8..N tokens")
     parser.add_argument("--n-thoughts", type=int, default=None, dest="n_thoughts",
                         help="Override the number of thought tokens (0 = control model without thoughts)")
     parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
@@ -978,6 +1003,9 @@ if __name__ == "__main__":
         spike_factor            = args.spike_factor,
         thought_prefix_only     = args.thought_prefix_only,
         n_thoughts              = args.n_thoughts,
+        pretrain_data           = args.pretrain_data,
+        vocab_size              = args.vocab_size,
+        pretrain_prefix_max     = args.pretrain_prefix_max,
         max_loops               = args.max_loops,
         data_path               = args.data_path,
         seed                    = args.seed,
