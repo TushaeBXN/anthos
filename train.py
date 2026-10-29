@@ -257,6 +257,9 @@ def train(
     log_every: int | None = None,
     save_every: int | None = None,
     no_rep_penalty: bool = False,
+    model_set: str | None = None,
+    sft_data: str | None = None,
+    init_from: str | None = None,
     data_path: str | None = None,
     seed: int | None = None,
     run_name: str | None = None,
@@ -362,6 +365,14 @@ def train(
     # token (see docs/CAUSALITY_FIX.md). Needs prefix_len, which the chat loader supplies.
     if vocab_size is not None:     # e.g. 100352 for cl100k_base + chat specials, padded to a multiple of 128
         model_cfg.vocab_size = vocab_size
+
+    if model_set:                  # e.g. "dim=768,n_heads=12,n_kv_heads=4,expert_dim=384" (sizing experiments)
+        for kv in model_set.split(","):
+            k, v = kv.split("=")
+            if k.strip() == "phase1_steps":      # 0 = 8 loops from step 0 (speed benchmarks)
+                PHASE1_STEPS = int(v)
+            else:
+                setattr(model_cfg, k.strip(), type(getattr(model_cfg, k.strip()))(v))
 
     # Control models: --n-thoughts 0 drops the thought stream; --max-loops 1 on top gives a plain transformer.
     if n_thoughts is not None:
@@ -546,7 +557,16 @@ def train(
         if is_main_process():
             print(f"  ✓ Resumed from {resume} at step {start_step}")
 
-    is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening", "code"))
+    if init_from:      # SFT on a pretrained base: weights only, fresh optimizer, step 0
+        meta = load_checkpoint_distributed(Path(init_from), model, optimizer=None, device=device)
+        if sft_data:
+            from anthos.sft_cl100k import reinit_new_token_embeddings
+            n_new = reinit_new_token_embeddings(unwrap_model(model))
+        if is_main_process():
+            print(f"  ✓ Initialised weights from {init_from} (pretrain step {meta.get('step', '?')}); optimizer and step reset"
+                  + (f"; {n_new} new-token embeddings re-initialised" if sft_data else ""))
+
+    is_sft      = (tier in ("sft", "instruct", "convo_smoke", "identity_hardening", "code")) or bool(sft_data)
     is_distill  = (tier == "distill")
     is_history  = (tier == "history")
 
@@ -555,7 +575,14 @@ def train(
     else:
         tok_path = "gpt2"  # proof checkpoint vocab is 50257, must match
 
-    if is_history:
+    if sft_data:
+        from anthos.sft_cl100k import get_sft_bin_dataloader
+        loader = get_sft_bin_dataloader(sft_data, train_cfg.batch_size, seed=seed or 0,
+                                        return_prefix_len=thought_prefix_only)
+        print(f"  ✓ cl100k SFT data: {sft_data}")
+        tok_path = "tiktoken:cl100k_base"
+
+    elif is_history:
         history_dir = "data/new_history"
         print(f"  ✓ History tier: training on markdown essays in {history_dir}/")
         loader  = get_markdown_dataloader(
@@ -774,6 +801,7 @@ def train(
                 labels          = batch[1].to(device)[:, :_eff_seq]
                 # next-token alignment: position i must predict token i+1 (labels are unshifted)
                 input_ids_in, labels = next_token_pair(input_ids, labels)
+                labels = labels.contiguous()      # the shifted slice is a view; the loss flattens it with .view
             else:
                 batch        = batch.to(device)
                 input_ids_in = batch[:, :_eff_seq-1]
@@ -1026,6 +1054,12 @@ if __name__ == "__main__":
     parser.add_argument("--save-every", type=int, default=None, dest="save_every")
     parser.add_argument("--no-rep-penalty", action="store_true", dest="no_rep_penalty",
                         help="skip the n-gram repetition penalty loss (slow; not needed for pretraining on real text)")
+    parser.add_argument("--model-set", default=None, dest="model_set",
+                        help="Override model config fields, comma-separated k=v (e.g. dim=768,n_heads=12,n_kv_heads=4,expert_dim=384)")
+    parser.add_argument("--sft-data", default=None, dest="sft_data",
+                        help="cl100k SFT dir from build_sft_cl100k.py (use <dir>/train); needs --init-from")
+    parser.add_argument("--init-from", default=None, dest="init_from",
+                        help="load model weights only from this checkpoint (fresh optimizer, step 0)")
     parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
                         help="Override max loop iterations (1 with --n-thoughts 0 = plain transformer control)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
@@ -1060,6 +1094,9 @@ if __name__ == "__main__":
         log_every               = args.log_every,
         save_every              = args.save_every,
         no_rep_penalty          = args.no_rep_penalty,
+        model_set               = args.model_set,
+        sft_data                = args.sft_data,
+        init_from               = args.init_from,
         data_path               = args.data_path,
         seed                    = args.seed,
         run_name                = args.run_name,
