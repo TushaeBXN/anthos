@@ -256,6 +256,7 @@ def train(
     grad_accum: int | None = None,
     log_every: int | None = None,
     save_every: int | None = None,
+    no_rep_penalty: bool = False,
     data_path: str | None = None,
     seed: int | None = None,
     run_name: str | None = None,
@@ -400,8 +401,8 @@ def train(
     if device.startswith("cuda"):
         try:
             torch.backends.cuda.enable_flash_sdp(True)
-            torch.backends.cuda.enable_mem_efficient_sdp(False)
-            torch.backends.cuda.enable_math_sdp(False)   # disable slow fallback
+            torch.backends.cuda.enable_mem_efficient_sdp(True)   # fallbacks stay on: flash is still tried first,
+            torch.backends.cuda.enable_math_sdp(True)            # but a call it can't take must not raise 'Invalid backend'
         except Exception:
             pass   # older PyTorch version — SDPA still works, just no explicit hint
 
@@ -815,7 +816,8 @@ def train(
                     # entropy) and positions that used more ACT loops get more gradient
                     loops_used = getattr(model, "_last_loops_used", None)
                     ce         = eaft_criterion(logits, labels, loops_used=loops_used)
-                    rep_pen = rep_loss_fn(logits)
+                    # the n-gram repetition penalty is a python loop with a full-vocab softmax per hit: ~10x slower than the model
+                    rep_pen = logits.new_zeros(()) if no_rep_penalty else rep_loss_fn(logits)
                     thought_acts = thought_collector.flat_activations().to(device)
                     n_thought    = model_cfg.n_thought_tokens
                     # ── FIX: trim thought_acts to a clean multiple of (n_thought * dim)
@@ -1022,6 +1024,8 @@ if __name__ == "__main__":
     parser.add_argument("--grad-accum", type=int, default=None, dest="grad_accum")
     parser.add_argument("--log-every", type=int, default=None, dest="log_every")
     parser.add_argument("--save-every", type=int, default=None, dest="save_every")
+    parser.add_argument("--no-rep-penalty", action="store_true", dest="no_rep_penalty",
+                        help="skip the n-gram repetition penalty loss (slow; not needed for pretraining on real text)")
     parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
                         help="Override max loop iterations (1 with --n-thoughts 0 = plain transformer control)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
@@ -1055,6 +1059,7 @@ if __name__ == "__main__":
         grad_accum              = args.grad_accum,
         log_every               = args.log_every,
         save_every              = args.save_every,
+        no_rep_penalty          = args.no_rep_penalty,
         data_path               = args.data_path,
         seed                    = args.seed,
         run_name                = args.run_name,
