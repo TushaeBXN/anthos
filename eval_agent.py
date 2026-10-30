@@ -21,21 +21,28 @@ from anthos.sft_cl100k import BLOCKED, CALL, DONE, END, EOS, RES, ChatTok, encod
 from synth_trajectories import SYSTEM, Env, check, good
 
 
+DEV = "cpu"
+
+
+def _t(v):
+    return torch.tensor(v, device=DEV)
+
+
 @torch.no_grad()
 def run_episode(m, tok, task, grade, max_steps=5, max_new=40, loops=8):
     prompt = encode_prompt(tok, SYSTEM, [("human", task)], grade)
     ids, plen, env, steps = list(prompt), len(prompt), Env(), []
     for _ in range(max_steps):
         cache = {}
-        logits = m(torch.tensor([ids]), n_loops=loops, kv_cache=cache, prefix_len=plen)[0, -1]
+        logits = m(_t([ids]), n_loops=loops, kv_cache=cache, prefix_len=plen)[0, -1]
         out, status_tok = [], None
         for j in range(max_new):
             nxt = int(logits.argmax()); out.append(nxt)
             if nxt == END:
                 # the status token (<|done|>/<|blocked|>) follows the <|end|> of a final answer
-                status_tok = int(m(torch.tensor([[END]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=plen)[0, -1].argmax())
+                status_tok = int(m(_t([[END]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=plen)[0, -1].argmax())
                 break
-            logits = m(torch.tensor([[nxt]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=plen)[0, -1]
+            logits = m(_t([[nxt]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=plen)[0, -1]
         ids += out
         if out and out[0] == CALL and out[-1] == END:
             try:
@@ -61,6 +68,8 @@ def main():
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=777)
     a = ap.parse_args()
+    global DEV
+    DEV = a.device
     cfg, _ = get_training_config("proof")
     cfg.vocab_size = 100352; cfg.thought_prefix_only = True; cfg.moe_fix_weight_order = True
     m = Anthos(cfg).to(a.device).eval()

@@ -346,9 +346,9 @@ def _load_rank0(path, model, optimizer, device):
             if is_main_process():
                 print("  ℹ Optimizer groups changed — resetting optimizer", flush=True)
     if "rng_cpu" in ckpt:
-        torch.set_rng_state(ckpt["rng_cpu"])
+        torch.set_rng_state(ckpt["rng_cpu"].cpu())     # loaded with map_location=device, but the RNG state must be a CPU ByteTensor
     if "rng_cuda" in ckpt and ckpt["rng_cuda"] and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(ckpt["rng_cuda"])
+        torch.cuda.set_rng_state_all([t.cpu() for t in ckpt["rng_cuda"]])
     return {k: ckpt[k] for k in ("step", "loss", "data_step") if k in ckpt}
 
 

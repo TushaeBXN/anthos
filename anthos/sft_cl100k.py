@@ -116,7 +116,7 @@ def reinit_new_token_embeddings(model, seed: int = 0) -> int:
         mean = w[:BASE_VOCAB].float().mean(0)
         std = w[:BASE_VOCAB].float().std(0).mean() * 0.1
         n = MODEL_VOCAB - BASE_VOCAB
-        w[BASE_VOCAB:] = (mean[None, :] + torch.randn(n, w.shape[1], generator=g) * std).to(w.dtype)
+        w[BASE_VOCAB:] = (mean[None, :] + torch.randn(n, w.shape[1], generator=g).to(w.device) * std).to(w.dtype)
     return n
 
 

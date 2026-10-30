@@ -18,6 +18,13 @@ from anthos.main import Anthos
 from anthos.sft_cl100k import DEFAULT_SYSTEM, END, GRADES, SFTBinDataset, ChatTok, encode_prompt
 from synth_verifiable import make_task
 
+DEV = "cpu"
+
+
+def _t(v):
+    return torch.tensor(v, device=DEV)
+
+
 IDENTITY_PROMPTS = ["Who are you?", "Who created you?", "Are you ChatGPT?", "What is the capital of France?",
                     "Tell me a short story about a dog."]
 
@@ -25,25 +32,27 @@ IDENTITY_PROMPTS = ["Who are you?", "Who created you?", "Are you ChatGPT?", "Wha
 @torch.no_grad()
 def generate(m, ids, max_new=48, loops=8):
     cache, out_ids = {}, []
-    x = torch.tensor([ids])
+    x = _t([ids])
     logits = m(x, n_loops=loops, kv_cache=cache, prefix_len=len(ids))[0, -1]
     for j in range(max_new):
         nxt = int(logits.argmax())
         out_ids.append(nxt)
         if nxt == END or nxt == 100257:
             break
-        logits = m(torch.tensor([[nxt]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=len(ids))[0, -1]
+        logits = m(_t([[nxt]]), n_loops=loops, kv_cache=cache, start_pos=len(ids) + j, prefix_len=len(ids))[0, -1]
     return out_ids
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("ckpt")
-    ap.add_argument("--val", default="data/sft_cl100k/val")
+    ap.add_argument("--val", default="data/sft_cl100k_v2/val")
     ap.add_argument("--n-tasks", type=int, default=60)
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--seed", type=int, default=123)
     a = ap.parse_args()
+    global DEV
+    DEV = a.device
 
     cfg, _ = get_training_config("proof")
     cfg.vocab_size = 100352; cfg.thought_prefix_only = True; cfg.moe_fix_weight_order = True
@@ -56,13 +65,17 @@ def main():
     ds = SFTBinDataset(a.val, epochs=1)
     ce_sum, n_tok, graded = [0.0, 0.0], [0, 0], 0
     toks = np.memmap(f"{a.val}/tokens.bin", dtype=np.uint32, mode="r")
+    mpath = f"{a.val}/mask.bin"
+    masks = np.memmap(mpath, dtype=np.uint8, mode="r") if __import__("os").path.exists(mpath) else None
     for off, n, p in ds.index:
-        ids = torch.from_numpy(toks[off:off + n].astype(np.int64))[None]
-        g = int(any(int(t) in GRADES.values() for t in ids[0, :int(p)]))
+        ids = torch.from_numpy(toks[off:off + n].astype(np.int64))[None].to(DEV)
+        g = int(any(int(t) in GRADES.values() for t in ids[0, :int(p)].tolist()))
         with torch.no_grad():
-            lg, _ = m(ids[:, :-1], n_loops=8, return_aux=True, prefix_len=torch.tensor([int(p)]))
-        tgt = ids[0, int(p):]
-        ce_sum[g] += F.cross_entropy(lg[0, int(p) - 1:].float(), tgt, reduction="sum").item(); n_tok[g] += len(tgt)
+            lg, _ = m(ids[:, :-1], n_loops=8, return_aux=True, prefix_len=_t([int(p)]))
+        # score only the tokens the model was trained to produce: after the prompt, and not tool results
+        learned = torch.from_numpy(masks[off:off + n].astype(np.int64)) if masks is not None else (torch.arange(n) >= int(p)).long()
+        sel = learned[1:].to(DEV) == 1
+        ce_sum[g] += F.cross_entropy(lg[0][sel].float(), ids[0, 1:][sel], reduction="sum").item(); n_tok[g] += int(sel.sum())
         graded += g
     res = {"step": sd.get("step"), "val_ce_general": round(ce_sum[0] / max(1, n_tok[0]), 4),
            "val_ce_graded": round(ce_sum[1] / max(1, n_tok[1]), 4), "val_examples": len(ds.index)}
