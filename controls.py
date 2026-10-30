@@ -48,7 +48,8 @@ def counts(model):
     dead = 0
     if model.recurrent.n_thought == 0:                       # modules that never run without thoughts
         for name in ("memory_bank", "thought_injection", "prerouter_head"):
-            dead += sum(p.numel() for p in getattr(model.recurrent, name).parameters())
+            mod = getattr(model.recurrent, name)
+            dead += sum(p.numel() for p in mod.parameters()) if mod is not None else 0
         dead += model.thought_pool.embeddings.numel() if hasattr(model, "thought_pool") else 0
     if not model.recurrent.block.use_moe:
         dead += sum(p.numel() for p in model.recurrent.prerouter_head.parameters()) if model.recurrent.n_thought > 0 else 0

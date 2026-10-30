@@ -16,8 +16,27 @@ import random
 import re
 
 PRICES = {"apple": 3, "pear": 4, "notebook": 12, "lamp": 25, "mug": 8, "cable": 6, "book": 15, "pen": 2,
-          "chair": 40, "clock": 18, "plant": 9, "towel": 7, "bottle": 5, "candle": 11, "frame": 14}
+          "chair": 40, "clock": 18, "plant": 9, "towel": 7, "bottle": 5, "candle": 11, "frame": 14,
+          "plate": 10, "spoon": 2, "basket": 13, "pillow": 16, "mirror": 22, "vase": 19, "ruler": 3, "stapler": 9,
+          "folder": 4, "scarf": 17, "wallet": 28, "helmet": 35, "kettle": 24, "shovel": 21, "broom": 12}
 MISSING = ["gizmo", "sprocket", "widget", "trinket", "doohickey"]
+# Items and missing words that only the unseen evaluation uses: training never sees them, so a pass means the
+# procedure (look up, then calculate; say so when the item is missing) was learned, not the price table.
+HOLDOUT_ITEMS = ["clock", "plant", "towel", "bottle", "helmet", "kettle"]
+MISSING_EVAL = ["flange", "bracket", "gadget"]
+POOL = list(PRICES)
+MISSING_POOL = list(MISSING)
+
+
+def set_split(split: str):
+    """'all' (default), 'train' (holdout items removed) or 'eval' (holdout items and unseen missing words only)."""
+    global POOL, MISSING_POOL
+    if split == "train":
+        POOL = [i for i in PRICES if i not in HOLDOUT_ITEMS]; MISSING_POOL = list(MISSING)
+    elif split == "eval":
+        POOL = list(HOLDOUT_ITEMS); MISSING_POOL = list(MISSING_EVAL)
+    else:
+        POOL = list(PRICES); MISSING_POOL = list(MISSING)
 SYSTEM = "You are Anthos. You can call tools: calc(expr), lookup(key), write_note(text). Finish the task or say why you cannot."
 
 
@@ -63,12 +82,12 @@ def good(rng):
                     [call("calc", expr=f"{a}+{b}"), call("calc", expr=f"{s}*{c}")],
                     f"The answer is {s * c}.", "done", 4, "chain")
     if k == "price":
-        it, n = rng.choice(list(PRICES)), rng.randint(2, 9)
+        it, n = rng.choice(POOL), rng.randint(2, 9)
         return _rec(f"How much do {n} {it}s cost? Look up the price first.",
                     [call("lookup", key=it), call("calc", expr=f"{PRICES[it]}*{n}")],
                     f"{n} {it}s cost {PRICES[it] * n}.", "done", 4, "price")
     if k == "blocked":
-        it = rng.choice(MISSING)
+        it = rng.choice(MISSING_POOL)
         return _rec(f"How much do 3 {it}s cost? Look up the price first.", [call("lookup", key=it)],
                     f"I could not find a price for {it}, so I cannot work out the cost.", "blocked", 4, "blocked")
     text = rng.choice(["buy milk", "call the dentist", "water the plants", "send the report", "renew the passport"])
@@ -77,7 +96,7 @@ def good(rng):
 
 def bad(rng):
     k = rng.choice(["stall", "lazy_quit", "wrong", "false_claim"])
-    it, n = rng.choice(list(PRICES)), rng.randint(2, 9)
+    it, n = rng.choice(POOL), rng.randint(2, 9)
     task = f"How much do {n} {it}s cost? Look up the price first."
     if k == "stall":      # the same call again and again, then a made-up answer
         return _rec(task, [call("lookup", key=it)] * 3, f"{n} {it}s cost {PRICES[it] * n + rng.randint(1, 9)}.", "done", 0, k)
@@ -100,7 +119,7 @@ def check(rec) -> int:
     m = re.search(r"How much do (\d+) (\w+?)s cost", rec["task"])
     if m:
         n, it = int(m.group(1)), m.group(2)
-        if it in MISSING:
+        if it in MISSING or it in MISSING_EVAL:
             return 4 if rec["status"] == "blocked" and results[:1] == ["not found"] else 0
         want = str(PRICES[it] * n)
         return 4 if (len(calls) == 2 and rec["status"] == "done" and want in rec["final"]) else 0
@@ -119,7 +138,9 @@ def main():
     ap.add_argument("--out", default="data/sft_synth_traj.jsonl")
     ap.add_argument("--bad-frac", type=float, default=0.3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--split", choices=["all", "train", "eval"], default="all")
     a = ap.parse_args()
+    set_split(a.split)
     rng = random.Random(a.seed)
     mismatch = 0
     with open(a.out, "w") as f:

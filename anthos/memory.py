@@ -80,6 +80,7 @@ No other changes to main.py are required.
 
 from __future__ import annotations
 
+import warnings
 import math
 from dataclasses import dataclass, field
 from typing import Optional
@@ -101,6 +102,7 @@ class MemoryBankConfig:
     dropout:   float = 0.0
     gate_bias: float = -2.0   # Init write gates near-zero — conservative early training
     retention: float = 0.95   # LTI retention rate across loop iterations
+    readout_norm: bool = False  # True: normalise the readout before adding it, so a small stored signal is not drowned out
     # Lower retention (e.g. 0.80) during early training with sparse data
     # reduces dependence on cold-start.  Increase as dataset grows.
 
@@ -154,6 +156,11 @@ class MemoryBank(nn.Module):
         super().__init__()
         self.cfg  = cfg
         D, M, H   = cfg.d_model, cfg.n_slots, cfg.n_heads
+        self.readout_scale = None
+        if cfg.readout_norm:         # RMS-normalise the readout; the learned scale starts at 0.3 of a thought token
+            self.readout_scale = nn.RMSNorm(D)
+            with torch.no_grad():
+                self.readout_scale.weight.fill_(0.3)
         assert D % H == 0, f"d_model {D} must be divisible by n_heads {H}"
         self.head_dim = D // H
 
@@ -372,6 +379,8 @@ class MemoryBank(nn.Module):
 
         normed   = self.read_norm(thought_tokens)
         readout  = self._read(normed, state)
+        if self.readout_scale is not None:
+            readout = self.readout_scale(readout)
         enriched = thought_tokens + readout          # residual
         new_state = self._write(thought_tokens, readout, state)
 
@@ -423,6 +432,8 @@ class ExternalMemoryReader:
         self.n_results         = n_results
         self.fallback_memories = fallback_memories or []
         self._engram_available = self._check_engram()
+        self._objs   = None       # (Searcher, LayerStack), built on first use
+        self._warned = False
 
     def _check_engram(self) -> bool:
         try:
@@ -433,6 +444,25 @@ class ExternalMemoryReader:
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
 
+    def _engram_objects(self):
+        """Current Engram API (1.10): Chateau + Searcher + LayerStack, built once. Raises if Engram has moved again."""
+        if self._objs is None:
+            from engram.backends import get_backend
+            from engram.chateau  import Chateau
+            from engram.layers   import LayerStack
+            from engram.searcher import Searcher
+
+            chateau  = Chateau()
+            searcher = Searcher(get_backend("chromadb"), chateau)
+            self._objs = (searcher, LayerStack(chateau, searcher))
+        return self._objs
+
+    def _warn_once(self, msg: str) -> None:
+        """A failure here used to be swallowed and look like 'no memories'; say so, once."""
+        if not self._warned:
+            self._warned = True
+            warnings.warn(msg, RuntimeWarning, stacklevel=3)
+
     def retrieve(self, query: str) -> list[str]:
         """Return relevant memory strings for a query."""
         if self._engram_available:
@@ -440,27 +470,23 @@ class ExternalMemoryReader:
         return self.fallback_memories[: self.n_results]
 
     def _engram_retrieve(self, query: str) -> list[str]:
-        """Query Engram's searcher directly — no MCP, no subprocess."""
+        """Query Engram's searcher directly (no MCP, no subprocess). Superseded memories are dropped: a corrected
+        memory is history, and feeding it to the model as fact is worse than feeding nothing."""
         try:
-            from engram.backends import get_backend
-            from engram.palace   import Palace
-            from engram.searcher import Searcher
-            from engram.config   import EngramConfig
-
-            cfg      = EngramConfig.load()
-            palace   = Palace(cfg.palace_path)
-            backend  = get_backend(cfg.vector_backend)
-            searcher = Searcher(backend, palace)
-
-            results = searcher.search(
-                query,
-                wing=self.engram_wing,
-                room=self.engram_room,
-                max_results=self.n_results,
-            )
-            return [r["text"] for r in results]
-        except Exception:
+            searcher, _ = self._engram_objects()
+            wing = None if self.engram_wing in (None, "", "default") else self.engram_wing
+            results = searcher.search(query, n=self.n_results, wing=wing, room=self.engram_room)
+        except Exception as exc:
+            self._warn_once(f"Engram retrieval failed ({type(exc).__name__}: {exc}); using the fallback memories")
             return self.fallback_memories[: self.n_results]
+        out = []
+        for r in results:
+            status = r.get("status")
+            if status == "superseded":
+                continue
+            text = r["text"]
+            out.append(("[DISPUTED] " + text) if status == "disputed" else text)
+        return out
 
     # ── Prefix building ────────────────────────────────────────────────────────
 
@@ -525,18 +551,16 @@ class ExternalMemoryReader:
     def wake_up_context(self, wing: Optional[str] = None) -> str:
         """
         Load Engram L0 + L1 cold-start context (~170 tokens).
-        Returns empty string if Engram is not installed.
+        Returns empty string if Engram is not installed (and warns once if it is installed but the call fails).
         """
         if not self._engram_available:
             return ""
         try:
-            from engram.layers import MemoryStack
-            from engram.config  import EngramConfig
-
-            cfg   = EngramConfig.load()
-            stack = MemoryStack(cfg)
-            return stack.wake_up(wing=wing or self.engram_wing)
-        except Exception:
+            _, stack = self._engram_objects()
+            use_wing = wing or (None if self.engram_wing in (None, "", "default") else self.engram_wing)
+            return stack.wake_up(wing=use_wing)
+        except Exception as exc:
+            self._warn_once(f"Engram wake-up failed ({type(exc).__name__}: {exc})")
             return ""
 
 

@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--val", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-answer-tokens", type=int, default=1)
+    ap.add_argument("--min-grade", type=int, default=None, help="drop graded examples below this grade (checker-passed only: 4)")
+    ap.add_argument("--no-grade-tag", action="store_true", help="leave the <|grade:k|> tag out of the prompt")
     ap.add_argument("--drop-source", action="append", default=[], help="drop examples whose 'source' field equals this")
     ap.add_argument("--drop-regex", default=DROP_RE, help="drop examples whose answer matches (wrong-creator claims)")
     a = ap.parse_args()
@@ -63,6 +65,9 @@ def main():
             if not line:
                 continue
             d = json.loads(line)
+            g_ = d.get("grade")
+            if a.min_grade is not None and g_ is not None and g_ < a.min_grade:
+                stats[f"{d.get('source', Path(path).stem)}:skip_low_grade"] += 1; continue
             if "steps" in d:                      # tool-use trajectory (synth_trajectories.py format)
                 src = d.get("source", Path(path).stem)
                 stats[f"{src}:read"] += 1
@@ -70,7 +75,7 @@ def main():
                 if key in seen:
                     stats[f"{src}:skip_dup"] += 1; continue
                 seen.add(key)
-                enc = encode_trajectory(tok, SYSTEM_TOOLS, d["task"], d["steps"], d["final"], d["status"], d.get("grade"), a.max_len)
+                enc = encode_trajectory(tok, SYSTEM_TOOLS, d["task"], d["steps"], d["final"], d["status"], None if a.no_grade_tag else d.get("grade"), a.max_len)
                 if enc is None:
                     stats[f"{src}:skip_too_long_or_bad"] += 1; continue
                 ids, p, m = enc
@@ -89,7 +94,7 @@ def main():
             if key in seen:
                 stats[f"{src}:skip_dup"] += 1; continue
             seen.add(key)
-            grade = d.get("grade")
+            grade = None if a.no_grade_tag else d.get("grade")
             enc = encode_example(tok, sysm, turns, grade, a.max_len)
             if enc is None:
                 stats[f"{src}:skip_too_long_or_bad"] += 1; continue

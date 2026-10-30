@@ -18,7 +18,7 @@ import torch
 from anthos.configs import get_training_config
 from anthos.main import Anthos
 from anthos.sft_cl100k import BLOCKED, CALL, DONE, END, EOS, RES, ChatTok, encode_prompt
-from synth_trajectories import SYSTEM, Env, check, good
+from synth_trajectories import SYSTEM, Env, check, good, set_split
 
 
 DEV = "cpu"
@@ -66,12 +66,20 @@ def main():
     ap.add_argument("--n", type=int, default=40)
     ap.add_argument("--grade", type=int, default=4)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--model-set", default=None, dest="model_set", help="model config overrides, comma-separated k=v")
     ap.add_argument("--seed", type=int, default=777)
+    ap.add_argument("--no-grade-tag", action="store_true", help="the model was trained without grade tags")
+    ap.add_argument("--unseen", action="store_true", help="tasks use only items and missing words that training never saw")
     a = ap.parse_args()
+    if a.unseen:
+        set_split("eval")
     global DEV
     DEV = a.device
     cfg, _ = get_training_config("proof")
     cfg.vocab_size = 100352; cfg.thought_prefix_only = True; cfg.moe_fix_weight_order = True
+    for kv in (a.model_set or "").split(","):          # e.g. dim=768,n_heads=12,... (default: the 512-wide proof config)
+        if kv:
+            k, v = kv.split("="); setattr(cfg, k, type(getattr(cfg, k))(v))
     m = Anthos(cfg).to(a.device).eval()
     m.load_state_dict(torch.load(a.ckpt, map_location="cpu", weights_only=False)["model"], strict=False)
     tok, rng = ChatTok(), random.Random(a.seed)
@@ -79,7 +87,7 @@ def main():
     shown = 0
     for _ in range(a.n):
         ref = good(rng)
-        r = run_episode(m, tok, ref["task"], a.grade)
+        r = run_episode(m, tok, ref["task"], None if a.no_grade_tag else a.grade)
         rec = {"task": ref["task"], **r}
         keys = [json.dumps(s["call"], sort_keys=True) for s in r["steps"]]
         stats["stalled"] += int(len(keys) != len(set(keys)))
@@ -88,7 +96,7 @@ def main():
         stats["graded_4"] += int(r["status"] is not None and check(rec) == 4)
         if shown < 3:
             shown += 1; print("TASK:", ref["task"], "\n  ", json.dumps(r)[:300])
-    print(json.dumps({k: round(v / a.n, 3) for k, v in stats.items()} | {"n": a.n, "grade": a.grade}))
+    print(json.dumps({k: round(v / a.n, 3) for k, v in stats.items()} | {"n": a.n, "grade": a.grade, "unseen": a.unseen}))
 
 
 if __name__ == "__main__":

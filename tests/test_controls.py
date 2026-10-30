@@ -103,3 +103,45 @@ def test_default_param_count_is_unchanged():
     cfg, _ = get_training_config("proof")
     cfg.vocab_size = 100352
     assert sum(p.numel() for p in Anthos(cfg).parameters()) == 73_722_372
+
+
+def test_new_switches_default_to_the_trained_configuration():
+    cfg = AnthosConfig()
+    assert (cfg.use_memory_bank, cfg.use_loop_lora, cfg.injection) == (True, True, "lti")
+
+
+def _n_params(model):
+    return sum(p.numel() for p in model.parameters())
+
+
+def test_memory_bank_switch_removes_it_and_still_trains():
+    full, _, _ = step(make_cfg())
+    model, logits, loss = step(make_cfg(use_memory_bank=False))
+    assert model.recurrent.memory_bank is None and _n_params(model) < _n_params(full)
+    assert torch.isfinite(loss) and torch.isfinite(logits).all()
+
+
+def test_loop_lora_switch_removes_it_and_still_trains():
+    full, _, _ = step(make_cfg())
+    model, logits, loss = step(make_cfg(use_loop_lora=False))
+    assert model.recurrent.lora is None and _n_params(model) < _n_params(full)
+    assert torch.isfinite(loss) and torch.isfinite(logits).all()
+
+
+def test_plain_injection_has_no_parameters_and_still_trains():
+    full, _, _ = step(make_cfg())
+    model, logits, loss = step(make_cfg(injection="plain"))
+    assert _n_params(model) < _n_params(full)
+    assert not list(model.recurrent.seq_injection.parameters()) and not list(model.recurrent.thought_injection.parameters())
+    assert torch.isfinite(loss) and torch.isfinite(logits).all()
+
+
+def test_everything_off_together_trains():
+    cfg = make_cfg(use_memory_bank=False, use_loop_lora=False, injection="plain", ffn_type="dense", act_mode="last")
+    model, logits, loss = step(cfg)
+    assert torch.isfinite(loss) and torch.isfinite(logits).all()
+
+
+def test_injection_option_is_validated():
+    with pytest.raises(ValueError):
+        Anthos(make_cfg(injection="nope"))

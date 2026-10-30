@@ -49,13 +49,18 @@ def main():
     ap.add_argument("--val", default="data/sft_cl100k_v2/val")
     ap.add_argument("--n-tasks", type=int, default=60)
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--model-set", default=None, dest="model_set", help="model config overrides, comma-separated k=v")
     ap.add_argument("--seed", type=int, default=123)
+    ap.add_argument("--no-grade-tag", action="store_true", help="the model was trained without grade tags (checker-passed-only data)")
     a = ap.parse_args()
     global DEV
     DEV = a.device
 
     cfg, _ = get_training_config("proof")
     cfg.vocab_size = 100352; cfg.thought_prefix_only = True; cfg.moe_fix_weight_order = True
+    for kv in (a.model_set or "").split(","):          # e.g. dim=768,n_heads=12,... (default: the 512-wide proof config)
+        if kv:
+            k, v = kv.split("="); setattr(cfg, k, type(getattr(cfg, k))(v))
     m = Anthos(cfg).to(a.device).eval()
     sd = torch.load(a.ckpt, map_location="cpu", weights_only=False)
     m.load_state_dict(sd["model"], strict=False)
@@ -82,16 +87,17 @@ def main():
 
     # 2. grade steering: same questions asked with grade 4 and with grade 0; a checker scores each answer
     rng = random.Random(a.seed)
-    hits = {4: 0, 0: 0}; stops = 0; total = 0
+    grades = (None,) if a.no_grade_tag else (4, 0)
+    hits = {g: 0 for g in grades}; stops = 0; total = 0
     for _ in range(a.n_tasks):
         q, right, _ = make_task(rng)
-        for gr in (4, 0):
+        for gr in grades:
             out = generate(m, encode_prompt(tok, DEFAULT_SYSTEM, [("human", q)], grade=gr))
             stopped = bool(out) and out[-1] in (END, 100257)
             ans = tok.decode([t for t in out if t not in (END, 100257)]).strip()
             hits[gr] += int(ans == right); stops += int(stopped); total += 1
-    res.update({"exact_match_grade4": round(hits[4] / a.n_tasks, 3), "exact_match_grade0": round(hits[0] / a.n_tasks, 3),
-                "stops_cleanly": round(stops / total, 3)})
+    res.update({(f"exact_match_grade{g}" if g is not None else "exact_match"): round(hits[g] / a.n_tasks, 3) for g in grades})
+    res["stops_cleanly"] = round(stops / total, 3)
     print(json.dumps(res))
 
     for q in IDENTITY_PROMPTS:

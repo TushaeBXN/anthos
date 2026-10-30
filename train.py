@@ -372,7 +372,9 @@ def train(
             if k.strip() == "phase1_steps":      # 0 = 8 loops from step 0 (speed benchmarks)
                 PHASE1_STEPS = int(v)
             else:
-                setattr(model_cfg, k.strip(), type(getattr(model_cfg, k.strip()))(v))
+                cur = getattr(model_cfg, k.strip())
+                # bool("False") is True, so booleans are parsed by name
+                setattr(model_cfg, k.strip(), (v.strip().lower() in ("1", "true", "yes")) if isinstance(cur, bool) else type(cur)(v))
 
     # Control models: --n-thoughts 0 drops the thought stream; --max-loops 1 on top gives a plain transformer.
     if n_thoughts is not None:

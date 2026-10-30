@@ -120,6 +120,14 @@ class AnthosConfig:
     ffn_type:          str   = "moe"
     dense_ffn_dim:     int   = 0
 
+    # More ablation switches; the defaults reproduce every trained checkpoint.
+    use_memory_bank:   bool  = True      # False: thought tokens never read or write the 512-slot memory
+    use_loop_lora:     bool  = True      # False: no per-loop low-rank adjustment of the block output
+    memory_readout_norm: bool = False    # True: normalise the memory readout (its signal is ~1e-2 of a thought token otherwise)
+    memory_gate_bias:  float = -2.0      # initial write-gate bias of the memory bank (-2 = writes start at about 12%)
+    memory_to_sequence: bool = False     # True: add what the memory contributed straight into the sequence stream (a short path to the answer)
+    injection:         str   = "lti"     # "lti" (energy-conserving update) or "plain" (next state = block output)
+
     # RoPE
     rope_theta:        float = 10000.0
 
@@ -1103,6 +1111,13 @@ class LTIInjection(nn.Module):
 # ACT Halting
 # ─────────────────────────────────────────────────────────────────────────────
 
+class PlainInjection(nn.Module):
+    """Ablation of LTIInjection: no special update, the next state is simply the block output (x_{t+1} = block(x_t))."""
+
+    def forward(self, h: torch.Tensor, e: torch.Tensor, transformer_out: torch.Tensor) -> torch.Tensor:
+        return transformer_out
+
+
 class ACTHalting(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
@@ -1224,11 +1239,13 @@ class AnthosRecurrentBlock(nn.Module):
             dense_dim = cfg.dense_ffn_dim or (cfg.n_experts * cfg.expert_dim
                                               + cfg.n_shared_experts * cfg.expert_dim * cfg.n_experts_per_tok)
         self.block = TransformerBlock(cfg, use_moe=(cfg.ffn_type == "moe"), ffn_dim=dense_dim)
-        self.lora  = DualLoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
+        if cfg.injection not in ("lti", "plain"):
+            raise ValueError(f"injection must be 'lti' or 'plain', got {cfg.injection!r}")
+        self.lora  = DualLoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters) if cfg.use_loop_lora else None
 
         # Separate LTI injections for sequence and thought streams
-        self.seq_injection     = LTIInjection(cfg.dim)
-        self.thought_injection = LTIInjection(cfg.dim)
+        self.seq_injection     = LTIInjection(cfg.dim) if cfg.injection == "lti" else PlainInjection()
+        self.thought_injection = LTIInjection(cfg.dim) if cfg.injection == "lti" else PlainInjection()
 
         # Separate norms for sequence and thought streams
         self.h_pre_norm   = RMSNorm(cfg.dim)   # pre-combine norm for sequence h
@@ -1249,7 +1266,11 @@ class AnthosRecurrentBlock(nn.Module):
             d_model=cfg.dim,
             n_slots=512,
             n_heads=cfg.n_heads,
-        ))
+            readout_norm=cfg.memory_readout_norm,
+            gate_bias=cfg.memory_gate_bias,
+        )) if cfg.use_memory_bank else None
+        self.mem_to_seq = (nn.Linear(cfg.dim, cfg.dim, bias=False)
+                           if (cfg.memory_to_sequence and cfg.use_memory_bank) else None)
 
         # Precomputed loop-index sinusoidal embeddings
         self.loop_dim = cfg.dim // 8
@@ -1357,7 +1378,8 @@ class AnthosRecurrentBlock(nn.Module):
                 )
             else:
                 full_out, moe_aux = self.block(full_seq, combined_freqs, combined_mask, kv_cache, cache_key, n_prefix)
-            full_out = full_out + self.lora(full_out, t)
+            if self.lora is not None:
+                full_out = full_out + self.lora(full_out, t)
             moe_aux_total     = moe_aux_total + moe_aux
 
             if fast_decode:
@@ -1369,8 +1391,19 @@ class AnthosRecurrentBlock(nn.Module):
             if frozen_in is None:
                 thoughts = self.thought_norm(self.thought_injection(thoughts, e_thought, thought_out))
                 # MemoryBank read+write: thought tokens attend to persistent KV memory
-                if self.n_thought > 0:   # n_thought == 0 is the no-thoughts control model
+                if self.n_thought > 0 and self.memory_bank is not None:   # n_thought == 0 is the no-thoughts control model
+                    _before = thoughts
                     thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
+                    if self.mem_to_seq is not None:
+                        # a short path: what the memory added goes straight into the sequence stream. In prefix mode it is
+                        # only added at positions that may already see the thoughts (>= prefix_len - 1), so nothing leaks.
+                        delta = self.mem_to_seq((thoughts - _before).mean(dim=1))              # (B, D)
+                        if prefix_len is not None and self.cfg.thought_prefix_only:
+                            pos     = torch.arange(h.shape[1], device=h.device).unsqueeze(0)
+                            allowed = (pos >= (prefix_len.to(h.device).unsqueeze(1) - 1)).to(h.dtype)   # (B, T)
+                            h = h + allowed.unsqueeze(-1) * delta.unsqueeze(1)
+                        else:
+                            h = h + delta.unsqueeze(1)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             if self.cfg.act_mode == "last":      # ablation: no halting, the output is the last loop's state
@@ -1531,8 +1564,11 @@ class Anthos(nn.Module):
             elif isinstance(m, nn.Embedding):
                 nn.init.normal_(m.weight, std=0.02)
         # Restore LoRA-specific inits that _init_weights would overwrite
-        nn.init.kaiming_uniform_(self.recurrent.lora.B)
-        nn.init.ones_(self.recurrent.lora.scale.weight)
+        if self.recurrent.lora is not None:
+            nn.init.kaiming_uniform_(self.recurrent.lora.B)
+            nn.init.ones_(self.recurrent.lora.scale.weight)
+        if self.recurrent.mem_to_seq is not None:
+            nn.init.normal_(self.recurrent.mem_to_seq.weight, std=self.cfg.dim ** -0.5)
 
     def _get_rope_freqs(self, seq_len: int, use_mla: bool = False) -> torch.Tensor:
         """
