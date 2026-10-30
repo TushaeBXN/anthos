@@ -125,6 +125,8 @@ class AnthosConfig:
     use_loop_lora:     bool  = True      # False: no per-loop low-rank adjustment of the block output
     memory_readout_norm: bool = False    # True: normalise the memory readout (its signal is ~1e-2 of a thought token otherwise)
     memory_gate_bias:  float = -2.0      # initial write-gate bias of the memory bank (-2 = writes start at about 12%)
+    memory_slot_write: bool = False      # True: each thought token writes to its own best-matching memory slot (not one averaged write)
+    memory_seq_read:   bool = False      # True: sequence positions look up the memory slots by key (instead of one averaged vector)
     memory_to_sequence: bool = False     # True: add what the memory contributed straight into the sequence stream (a short path to the answer)
     injection:         str   = "lti"     # "lti" (energy-conserving update) or "plain" (next state = block output)
 
@@ -1267,6 +1269,7 @@ class AnthosRecurrentBlock(nn.Module):
             n_slots=512,
             n_heads=cfg.n_heads,
             readout_norm=cfg.memory_readout_norm,
+            slot_write=cfg.memory_slot_write,
             gate_bias=cfg.memory_gate_bias,
         )) if cfg.use_memory_bank else None
         self.mem_to_seq = (nn.Linear(cfg.dim, cfg.dim, bias=False)
@@ -1397,13 +1400,20 @@ class AnthosRecurrentBlock(nn.Module):
                     if self.mem_to_seq is not None:
                         # a short path: what the memory added goes straight into the sequence stream. In prefix mode it is
                         # only added at positions that may already see the thoughts (>= prefix_len - 1), so nothing leaks.
-                        delta = self.mem_to_seq((thoughts - _before).mean(dim=1))              # (B, D)
+                        if self.cfg.memory_seq_read:
+                            # key lookup: every sequence position queries the stored slots directly
+                            delta = self.memory_bank._read(self.memory_bank.read_norm(h), memory_state)       # (B, T, D)
+                            if self.memory_bank.readout_scale is not None:
+                                delta = self.memory_bank.readout_scale(delta)
+                            delta = self.mem_to_seq(delta)
+                        else:
+                            delta = self.mem_to_seq((thoughts - _before).mean(dim=1)).unsqueeze(1)         # (B, 1, D)
                         if prefix_len is not None and self.cfg.thought_prefix_only:
                             pos     = torch.arange(h.shape[1], device=h.device).unsqueeze(0)
                             allowed = (pos >= (prefix_len.to(h.device).unsqueeze(1) - 1)).to(h.dtype)   # (B, T)
-                            h = h + allowed.unsqueeze(-1) * delta.unsqueeze(1)
+                            h = h + allowed.unsqueeze(-1) * delta
                         else:
-                            h = h + delta.unsqueeze(1)
+                            h = h + delta
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
             if self.cfg.act_mode == "last":      # ablation: no halting, the output is the last loop's state

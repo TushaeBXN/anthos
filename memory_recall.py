@@ -80,6 +80,8 @@ def main():
                     help="standard: memory projections start at 1/sqrt(width) instead of the global 0.02, so the signal survives the chain")
     ap.add_argument("--readout-norm", action="store_true", help="normalise the memory readout before it is added to the thoughts")
     ap.add_argument("--mem-to-seq", action="store_true", help="add the memory's contribution straight into the sequence stream")
+    ap.add_argument("--slot-write", action="store_true", help="each thought writes to its own best-matching slot")
+    ap.add_argument("--seq-read", action="store_true", help="sequence positions look up the memory slots by key")
     ap.add_argument("--gate-bias", type=float, default=-2.0, help="initial write-gate bias (-2 = writes start at ~12%%)")
     ap.add_argument("--window", action="store_true", help="calibration: fact and question in one sequence (no memory needed)")
     ap.add_argument("--steps", type=int, default=1500)
@@ -103,6 +105,10 @@ def main():
         extra += ",memory_readout_norm=True"
     if a.mem_to_seq:
         extra += ",memory_to_sequence=True"
+    if a.slot_write:
+        extra += ",memory_slot_write=True"
+    if a.seq_read:
+        extra += ",memory_seq_read=True"
     extra += f",memory_gate_bias={a.gate_bias}"
     model = Anthos(build_cfg(extra))
     if a.mem_init == "standard" and a.bank == "on":
@@ -126,7 +132,7 @@ def main():
             ev = evaluate(model, a.facts, a.max_filler, a.filler_len, a.loops, window=a.window)
             history.append({"step": step, "loss": round(loss.item(), 3), **ev})
             print(json.dumps(history[-1]), flush=True)
-    final = {"bank": a.bank, "window": a.window, "mem_init": a.mem_init, "readout_norm": a.readout_norm, "mem_to_seq": a.mem_to_seq, "gate_bias": a.gate_bias, "facts": a.facts, "max_filler": a.max_filler, "steps": a.steps, "seed": a.seed,
+    final = {"bank": a.bank, "window": a.window, "mem_init": a.mem_init, "readout_norm": a.readout_norm, "mem_to_seq": a.mem_to_seq, "slot_write": a.slot_write, "seq_read": a.seq_read, "gate_bias": a.gate_bias, "facts": a.facts, "max_filler": a.max_filler, "steps": a.steps, "seed": a.seed,
              "chance": round(1 / N_VALS, 3), "final": history[-1], "minutes": round((time.time() - t0) / 60, 1)}
     with open(a.out, "a") as f:
         f.write(json.dumps(final) + "\n")

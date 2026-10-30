@@ -103,6 +103,7 @@ class MemoryBankConfig:
     gate_bias: float = -2.0   # Init write gates near-zero — conservative early training
     retention: float = 0.95   # LTI retention rate across loop iterations
     readout_norm: bool = False  # True: normalise the readout before adding it, so a small stored signal is not drowned out
+    slot_write: bool = False    # True: each thought token writes its own key/value into the one slot its key best matches (not one blended mean into every slot)
     # Lower retention (e.g. 0.80) during early training with sparse data
     # reduces dependence on cold-start.  Increase as dataset grows.
 
@@ -321,6 +322,19 @@ class MemoryBank(nn.Module):
         B, N_t, D = thought_tokens.shape
         M         = self.cfg.n_slots
         r         = self.cfg.retention
+
+        if self.cfg.slot_write:
+            # Per-thought write. Each thought picks the slot whose fingerprint its key matches best (hard in the forward
+            # pass, soft gradient), so separate facts land in separate slots instead of being averaged together.
+            nk = self.write_key_proj(self.write_norm(thought_tokens))                 # [B, N_t, D]
+            nv = self.write_val_proj(thought_tokens)                                  # [B, N_t, D]
+            logits = torch.einsum("bnd,md->bnm", nk, self.slot_ids[0]) / math.sqrt(D) * 8.0
+            soft   = F.softmax(logits, dim=-1)
+            hard   = F.one_hot(soft.argmax(-1), M).to(soft.dtype)
+            assign = hard + soft - soft.detach()                                      # [B, N_t, M]
+            gate   = torch.sigmoid(self.gate_slot_bias).view(1, 1, M)                 # [1, 1, M]
+            w      = (assign * gate).transpose(1, 2)                                  # [B, M, N_t]
+            return MemoryBankState(r * state.keys + torch.bmm(w, nk), r * state.values + torch.bmm(w, nv))
 
         # Aggregate thought state
         thought_mean = thought_tokens.mean(dim=1)          # [B, D]
