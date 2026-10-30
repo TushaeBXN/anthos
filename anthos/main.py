@@ -107,6 +107,18 @@ class AnthosConfig:
 
     # Adaptive Computation Time
     act_threshold:     float = 0.99
+    # How the per-loop outputs are combined (ablations; "standard" is what every checkpoint so far was trained with):
+    #   "standard"  p-weighted sum with the weight of the halting step capped by the remainder. A token that never
+    #               halts keeps only sum(p), with no remainder assigned: weight lands mostly on the last loops.
+    #   "remainder" classic ACT: a token that never halts gets its leftover (1 - sum p) on the final loop.
+    #   "last"      no halting: the output is the last loop's state, every token runs every loop.
+    act_mode:          str   = "standard"
+
+    # FFN of the looped block: "moe" (default) or "dense" (a single SwiGLU FFN, for the MoE-vs-dense control).
+    # dense_ffn_dim 0 = parameter-matched to the MoE it replaces (routed + shared experts); set it to
+    # n_shared*topk*expert_dim + topk*expert_dim to match compute per token instead.
+    ffn_type:          str   = "moe"
+    dense_ffn_dim:     int   = 0
 
     # RoPE
     rope_theta:        float = 10000.0
@@ -977,7 +989,8 @@ class MoDRouter(nn.Module):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TransformerBlock(nn.Module):
-    def __init__(self, cfg: AnthosConfig, use_moe: bool = False, layer_idx: int = 0, total_layers: int = 1):
+    def __init__(self, cfg: AnthosConfig, use_moe: bool = False, layer_idx: int = 0, total_layers: int = 1,
+                 ffn_dim: int = 0):
         super().__init__()
         self.attn_norm = RMSNorm(cfg.dim)
         self.ffn_norm  = RMSNorm(cfg.dim)
@@ -989,7 +1002,7 @@ class TransformerBlock(nn.Module):
         else:
             self.attn = GQAttention(cfg)
 
-        self.ffn     = MoEFFN(cfg) if use_moe else Expert(cfg.dim, cfg.dim * 4 // 3)
+        self.ffn     = MoEFFN(cfg) if use_moe else Expert(cfg.dim, ffn_dim or cfg.dim * 4 // 3)
         self.attn.fix_cached_causal = cfg.thought_prefix_only
         self.use_moe = use_moe
 
@@ -1202,7 +1215,15 @@ class AnthosRecurrentBlock(nn.Module):
         self.cfg       = cfg
         self.n_thought = cfg.n_thought_tokens
 
-        self.block = TransformerBlock(cfg, use_moe=True)
+        if cfg.ffn_type not in ("moe", "dense"):
+            raise ValueError(f"ffn_type must be 'moe' or 'dense', got {cfg.ffn_type!r}")
+        if cfg.act_mode not in ("standard", "remainder", "last"):
+            raise ValueError(f"act_mode must be 'standard', 'remainder' or 'last', got {cfg.act_mode!r}")
+        dense_dim = 0
+        if cfg.ffn_type == "dense":
+            dense_dim = cfg.dense_ffn_dim or (cfg.n_experts * cfg.expert_dim
+                                              + cfg.n_shared_experts * cfg.expert_dim * cfg.n_experts_per_tok)
+        self.block = TransformerBlock(cfg, use_moe=(cfg.ffn_type == "moe"), ffn_dim=dense_dim)
         self.lora  = DualLoRAAdapter(cfg.dim, cfg.lora_rank, cfg.max_loop_iters)
 
         # Separate LTI injections for sequence and thought streams
@@ -1352,6 +1373,10 @@ class AnthosRecurrentBlock(nn.Module):
                     thoughts, memory_state = self.memory_bank(thoughts, memory_state, e_summary)
             h        = self.h_norm(self.seq_injection(h, e, seq_out))
 
+            if self.cfg.act_mode == "last":      # ablation: no halting, the output is the last loop's state
+                loops_used = loops_used + 1.0
+                continue
+
             p             = self.act(h)
             still_running = ~halted
             remainder     = (1.0 - cumulative_p).clamp(min=0.0)
@@ -1372,10 +1397,16 @@ class AnthosRecurrentBlock(nn.Module):
         if frozen_out is not None:
             kv_cache["_frozen_thoughts"] = frozen_out
 
+        if self.cfg.act_mode == "last":
+            h_out = h
+        elif self.cfg.act_mode == "remainder":
+            # tokens that never reached the threshold put the rest of their weight on the final state
+            h_out = h_out + ((~halted).float() * (1.0 - cumulative_p).clamp(min=0.0)).unsqueeze(-1) * h
+
         act_aux = loops_used.mean()  # differentiable ACT penalty
 
-        if fast_decode:
-            # No thought rows went through the block, so there is no routing to compare against.
+        if fast_decode or not self.block.use_moe:
+            # No thought rows went through the block (or the FFN is dense), so there is no routing to compare against.
             return h_out, moe_aux_total, act_aux, memory_state, loops_used, h.new_zeros(()), halt_probs
 
         # ── PreRouter aux loss ────────────────────────────────────────────────
