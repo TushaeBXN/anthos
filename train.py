@@ -265,6 +265,7 @@ def train(
     run_name: str | None = None,
     lr: float | None = None,
     warmup: int | None = None,
+    loop_sample_min: int = 0,
 ):
     global MAX_STEPS, MAX_LR, MIN_LR, WARMUP_STEPS, SEQ_LEN, LOG_EVERY, SAVE_EVERY, PHASE1_STEPS, PHASE1_LOOPS, PHASE2_LOOPS
 
@@ -770,10 +771,13 @@ def train(
         print(f"  🔄 Training loop started — logging every {LOG_EVERY} steps, saving every {SAVE_EVERY}", flush=True)
         print(f"  ⏳ First log will appear after step {LOG_EVERY} (may take 1-2 min on CPU)...", flush=True)
 
+    _loop_gen = torch.Generator().manual_seed((seed or 0) + 7919)
     while step < MAX_STEPS:
         lr     = get_lr(step)
         for pg in optimizer.param_groups: pg["lr"] = lr
         n_loops = min(get_n_loops(step), model_cfg.max_loop_iters)
+        if loop_sample_min > 0 and step >= PHASE1_STEPS:       # random loop count each step: every loop count must give a usable answer
+            n_loops = int(torch.randint(loop_sample_min, n_loops + 1, (1,), generator=_loop_gen))
 
         # Curriculum: linearly ramp effective seq len from _curr_start_len → _curriculum_target_seq
         if curriculum:
@@ -1062,6 +1066,8 @@ if __name__ == "__main__":
                         help="cl100k SFT dir from build_sft_cl100k.py (use <dir>/train); needs --init-from")
     parser.add_argument("--init-from", default=None, dest="init_from",
                         help="load model weights only from this checkpoint (fresh optimizer, step 0)")
+    parser.add_argument("--loop-sample-min", type=int, default=0, dest="loop_sample_min",
+                        help="0 = off. N > 0: after the first phase, draw the loop count uniformly from N..max each step")
     parser.add_argument("--max-loops", type=int, default=None, dest="max_loops",
                         help="Override max loop iterations (1 with --n-thoughts 0 = plain transformer control)")
     parser.add_argument("--thought-prefix-only", action="store_true", dest="thought_prefix_only",
@@ -1091,6 +1097,7 @@ if __name__ == "__main__":
         vocab_size              = args.vocab_size,
         pretrain_prefix_max     = args.pretrain_prefix_max,
         max_loops               = args.max_loops,
+        loop_sample_min         = args.loop_sample_min,
         batch_size              = args.batch_size,
         grad_accum              = args.grad_accum,
         log_every               = args.log_every,

@@ -33,8 +33,12 @@ CONDITIONS = {
     "no_thoughts":     ",n_thought_tokens=0",
     # the regular model at this size: 7 ordinary layers (3 + 1 + 3), no loops, thoughts or experts, about the same
     # functional parameters as the baseline
+    # one block looped, nothing else: no experts, thoughts, memory, per-loop adjustments, halting gate or energy-conserving update
+    "stripped":        ",ffn_type=dense,n_thought_tokens=0,use_memory_bank=False,use_loop_lora=False,injection=plain,act_mode=last",
+    "stripped_rand":   ",ffn_type=dense,n_thought_tokens=0,use_memory_bank=False,use_loop_lora=False,injection=plain,act_mode=last",
     "plain_regular":   ",ffn_type=dense,dense_ffn_dim=256,max_loop_iters=1,n_thought_tokens=0,prelude_layers=3,coda_layers=3",
 }
+TRAIN_EXTRA = {"stripped_rand": ["--loop-sample-min", "2"]}      # random loop count (2..max) each step
 DATA = "data/pretrain_small8k"
 
 
@@ -54,7 +58,7 @@ def build_cfg(extra: str):
 
 
 @torch.no_grad()
-def heldout_ce(ckpt: str, extra: str, windows: int = 64, seq: int = 256, prefix: int = 32) -> float:
+def heldout_ce(ckpt: str, extra: str, windows: int = 64, seq: int = 256, prefix: int = 32, loops: int = 0) -> float:
     from anthos.main import Anthos
     cfg = build_cfg(extra)
     m = Anthos(cfg).eval()
@@ -64,7 +68,7 @@ def heldout_ce(ckpt: str, extra: str, windows: int = 64, seq: int = 256, prefix:
     ce = []
     for s in rng.integers(0, len(val) - seq - 1, windows):
         w = torch.tensor(val[s:s + seq + 1].astype(np.int64))[None]
-        lg, _ = m(w[:, :-1], n_loops=cfg.max_loop_iters, return_aux=True, prefix_len=torch.tensor([prefix]))
+        lg, _ = m(w[:, :-1], n_loops=loops or cfg.max_loop_iters, return_aux=True, prefix_len=torch.tensor([prefix]))
         ce.append(F.cross_entropy(lg[0, prefix - 1:].float(), w[0, 1:][prefix - 1:]).item())
     return float(np.mean(ce))
 
@@ -76,7 +80,7 @@ def run_one(name: str, seed: int, steps: int, lr: float, out: Path):
     cmd = [sys.executable, "train.py", "--tier", "smoke", "--pretrain-data", DATA, "--vocab-size", "8192",
            "--steps", str(steps), "--seed", str(seed), "--run-name", run, "--thought-prefix-only", "--no-rep-penalty",
            "--log-every", "100", "--save-every", str(steps), "--batch-size", "16", "--grad-accum", "1",
-           "--lr", str(lr), "--warmup", "100", "--model-set", ms]
+           "--lr", str(lr), "--warmup", "100", "--model-set", ms] + TRAIN_EXTRA.get(name, [])
     log = subprocess.run(cmd, capture_output=True, text=True)
     text = log.stdout + log.stderr
     params = re.search(r"Parameters:\s+([\d,]+)", text)
@@ -86,6 +90,7 @@ def run_one(name: str, seed: int, steps: int, lr: float, out: Path):
     else:
         rec = {"cond": name, "seed": seed, "steps": steps, "params": int(params[1].replace(",", "")) if params else None,
                "heldout_ce": round(heldout_ce(f"checkpoints/{run}/step_{steps:06d}.pt", CONDITIONS[name]), 4),
+               "ce_by_loops": {n: round(heldout_ce(f"checkpoints/{run}/step_{steps:06d}.pt", CONDITIONS[name], loops=n), 4) for n in (2, 3, 4, 6)},
                "tok_s": int(toks[-1].replace(",", "")) if toks else None, "minutes": round((time.time() - t0) / 60, 1)}
     with open(out, "a") as f:
         f.write(json.dumps(rec) + "\n")

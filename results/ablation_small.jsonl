@@ -9,3 +9,5 @@
 {"cond": "no_thoughts", "seed": 0, "steps": 2000, "params": 3392004, "heldout_ce": 4.7073, "tok_s": 8410, "minutes": 31.8}
 {"cond": "baseline", "seed": 1, "steps": 2000, "params": 3393540, "heldout_ce": 4.7278, "tok_s": 7610, "minutes": 34.9}
 {"cond": "baseline", "seed": 2, "steps": 2000, "params": 3393540, "heldout_ce": 4.7502, "tok_s": 7641, "minutes": 34.6}
+{"cond": "stripped", "seed": 0, "steps": 2000, "params": 2794753, "heldout_ce": 4.7163, "ce_by_loops": {"2": 4.7821, "3": 4.7478, "4": 4.7309, "6": 4.7163}, "tok_s": 9689, "minutes": 28.7}
+{"cond": "stripped_rand", "seed": 0, "steps": 2000, "params": 2794753, "heldout_ce": 4.756, "ce_by_loops": {"2": 4.765, "3": 4.759, "4": 4.7564, "6": 4.756}, "tok_s": 11506, "minutes": 23.8}
