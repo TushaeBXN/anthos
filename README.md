@@ -8,6 +8,9 @@
   [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
   [![License](https://img.shields.io/badge/License-CC_BY--NC_4.0-green?style=for-the-badge)](LICENSE)
+  [![Architecture](https://img.shields.io/badge/Architecture-Decoder--only_Transformer-5B9BD5?style=for-the-badge)](regular/model.py)
+  [![Anthos](https://img.shields.io/badge/Anthos_(looped)-Paused-lightgrey?style=for-the-badge)](docs/architecture.md)
+  [![Tests](https://img.shields.io/badge/Tests-104_passing_%C2%B7_4_known_errors-yellow?style=for-the-badge&logo=pytest&logoColor=white)](tests/)
 
 </div>
 
