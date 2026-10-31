@@ -1,0 +1,13 @@
+FROM /Volumes/500GBHD/models/Qwen3.5-9B-The-Defiant-Fable-Uncnr-Heretic-NEO-MAX-Q6_K.gguf
+
+# Same renderer/parser the working qwen35-test model uses (Ollama 0.34)
+RENDERER qwen3.5
+PARSER qwen3.5
+
+# Short context: Anthos trains at SEQ_LEN 256, so each example is a few hundred tokens
+PARAMETER num_ctx      2048
+PARAMETER num_predict  320
+PARAMETER temperature  0.7
+PARAMETER top_p        0.8
+PARAMETER top_k        20
+PARAMETER min_p        0
