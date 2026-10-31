@@ -16,6 +16,7 @@ If carry is high and reset/shuffle are near chance, the bank really stores and r
 """
 import argparse
 import json
+import os
 import time
 
 import torch
@@ -94,6 +95,7 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--threads", type=int, default=4)
     ap.add_argument("--out", default="results/memory_recall.jsonl")
+    ap.add_argument("--ckpt", default="", help="save here every 250 steps; if the file exists, resume from it")
     a = ap.parse_args()
     torch.set_num_threads(a.threads)
     torch.manual_seed(a.seed)
@@ -117,8 +119,17 @@ def main():
             torch.nn.init.normal_(lin.weight, std=lin.in_features ** -0.5)
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=0.01)
     gen = torch.Generator().manual_seed(a.seed + 1)
-    t0, history = time.time(), []
-    for step in range(1, a.steps + 1):
+    t0, history, start = time.time(), [], 1
+    if a.ckpt and os.path.exists(a.ckpt):
+        ck = torch.load(a.ckpt, weights_only=False)
+        model.load_state_dict(ck["model"])
+        opt.load_state_dict(ck["opt"])
+        gen.set_state(ck["gen"])
+        torch.set_rng_state(ck["rng"])
+        history, start = ck["history"], ck["step"] + 1
+        t0 -= ck["elapsed"]
+        print(f"RESUMED from step {ck['step']}", flush=True)
+    for step in range(start, a.steps + 1):
         for g in opt.param_groups:
             g["lr"] = a.lr * min(1.0, step / 50)
         n_fill = int(torch.randint(0, a.max_filler + 1, (1,), generator=gen))
@@ -132,7 +143,11 @@ def main():
             ev = evaluate(model, a.facts, a.max_filler, a.filler_len, a.loops, window=a.window)
             history.append({"step": step, "loss": round(loss.item(), 3), **ev})
             print(json.dumps(history[-1]), flush=True)
-    final = {"bank": a.bank, "window": a.window, "mem_init": a.mem_init, "readout_norm": a.readout_norm, "mem_to_seq": a.mem_to_seq, "slot_write": a.slot_write, "seq_read": a.seq_read, "gate_bias": a.gate_bias, "facts": a.facts, "max_filler": a.max_filler, "steps": a.steps, "seed": a.seed,
+            if a.ckpt:
+                torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "gen": gen.get_state(), "rng": torch.get_rng_state(),
+                            "history": history, "step": step, "elapsed": time.time() - t0}, a.ckpt + ".tmp")
+                os.replace(a.ckpt + ".tmp", a.ckpt)
+    final ={"bank": a.bank, "window": a.window, "mem_init": a.mem_init, "readout_norm": a.readout_norm, "mem_to_seq": a.mem_to_seq, "slot_write": a.slot_write, "seq_read": a.seq_read, "gate_bias": a.gate_bias, "facts": a.facts, "max_filler": a.max_filler, "steps": a.steps, "seed": a.seed,
              "chance": round(1 / N_VALS, 3), "final": history[-1], "minutes": round((time.time() - t0) / 60, 1)}
     with open(a.out, "a") as f:
         f.write(json.dumps(final) + "\n")

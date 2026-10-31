@@ -24,6 +24,13 @@ NODE0, K0, N_NODES, MAX_HOPS = 1000, 3000, 8, 4
 COND = dict(CONDITIONS)
 COND["stripped_rand"] = CONDITIONS["stripped"]
 COND["regular7"] = CONDITIONS["plain_regular"]
+_S = ",ffn_type=dense,n_thought_tokens=0,use_memory_bank=False,use_loop_lora=False,injection=plain,act_mode=last"
+# the stripped model with exactly one part added back
+COND["s_moe"] = _S.replace("ffn_type=dense", "ffn_type=moe")
+COND["s_lora"] = _S.replace("use_loop_lora=False", "use_loop_lora=True")
+COND["s_lti"] = _S.replace("injection=plain", "injection=lti")
+COND["s_act"] = _S.replace("act_mode=last", "act_mode=standard")
+COND["s_thoughts"] = _S.replace("n_thought_tokens=0", "n_thought_tokens=8")
 COND["regular3"] = ",ffn_type=dense,dense_ffn_dim=256,max_loop_iters=1,n_thought_tokens=0"
 
 
@@ -67,7 +74,7 @@ def evaluate(model, loop_counts, B=512, seed=123):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cond", choices=["stripped", "stripped_rand", "regular7", "regular3"], required=True)
+    ap.add_argument("--cond", choices=sorted(COND), required=True)
     ap.add_argument("--steps", type=int, default=3000)
     ap.add_argument("--batch", type=int, default=64)
     ap.add_argument("--lr", type=float, default=2e-3)
