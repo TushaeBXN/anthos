@@ -10,8 +10,8 @@ import torch
 from transformers import AutoTokenizer
 
 from anthos import Anthos
-from anthos.configs import get_training_config
-from anthos.steering import AnthosSteer
+from anthos.model.config import get_training_config
+from anthos.model.steering import AnthosSteer
 
 # ── Load trained model ────────────────────────────────────────────────────────
 

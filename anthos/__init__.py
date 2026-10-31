@@ -3,7 +3,7 @@ Anthos — Thought-Token Bifurcated Recurrent Transformer
 Think in Streams.
 """
 
-from anthos.main import (
+from anthos.train.trainer import (
     AnthosConfig,
     Anthos,
     ThoughtTokenPool,
@@ -21,30 +21,30 @@ from anthos.main import (
     anthos_100b,
 )
 
-from anthos.lora_pairs import (
+from anthos.train.lora_pairs import (
     DualLoRAAdapter,
 )
 
-from anthos.eaft import (
+from anthos.train.eaft import (
     EAFTLoss,
     StandardLoss,
 )
 
-from anthos.grpo import (
+from anthos.train.grpo import (
     GRPOConfig,
     GRPOTrainer,
     quality_reward,
     loop_efficiency_reward,
 )
 
-from anthos.multipack import (
+from anthos.train.multipack import (
     MultipackDataset,
     MultipackSampler,
     multipack_collate,
     build_pack_mask_fast,
 )
 
-from anthos.quant import (
+from anthos.inference.quant import (
     QuantConfig,
     detect_device,
     get_dtype,
@@ -52,32 +52,32 @@ from anthos.quant import (
     FP8Linear,
 )
 
-from anthos.train_additions import (
+from anthos.train.train_additions import (
     build_dataloader,
     build_loss,
     training_step,
 )
 
-from anthos.sae import (
+from anthos.train.sae import (
     SAEConfig,
     SparseAutoencoder,
     AnthosSAESuite,
 )
 
-from anthos.steering import (
+from anthos.model.steering import (
     AnthosSteer,
     ActivationCollector,
     ActivationSteering,
     LTIStateSteering,
 )
 
-from anthos.sasft import (
+from anthos.train.sasft import (
     FeatureSuppressionLoss,
     RepetitionPenaltyLoss,
     ThoughtDiversityLoss,
 )
 
-from anthos.features import (
+from anthos.model.features import (
     feature_rank,
     discover_features,
     monolinguality_score,
@@ -86,7 +86,7 @@ from anthos.features import (
     FeatureInterpreter,
 )
 
-from anthos.memory import (
+from anthos.memory.memory import (
     MemoryBankConfig,
     MemoryBankState,
     MemoryBank,
@@ -94,13 +94,13 @@ from anthos.memory import (
     MemoryAugmentedAnthos,
 )
 
-from anthos.memory_compress import (
+from anthos.memory.memory.memory_compress import (
     ESCompressor,
     MemoryAugmentedDataset,
     compress_jsonl,
 )
 
-from anthos.distill import (
+from anthos.train.distill import (
     DistillConfig,
     DistillationLoss,
     TeacherLabelGenerator,
@@ -108,7 +108,7 @@ from anthos.distill import (
     OnlineDistiller,
 )
 
-from anthos.export import (
+from anthos.inference.generate import (
     export_safetensors,
     export_hf_config,
     export_gguf_metadata,
@@ -116,7 +116,7 @@ from anthos.export import (
     export_for_deployment,
 )
 
-from anthos.kv_cache import (
+from anthos.model.kv_cache import (
     CacheConfig,
     SequenceKVCache,
     LTIStateCache,
@@ -124,7 +124,7 @@ from anthos.kv_cache import (
     CachedGenerator,
 )
 
-from anthos.identity_hardening import (
+from anthos.identity.identity_hardening import (
     AnthosWithIdentityLock,
     CheckpointSigner,
     IDENTITY_TOKEN_IDS,
@@ -132,17 +132,17 @@ from anthos.identity_hardening import (
     REQUIRED_IDENTITY_SEQUENCE,
     IdentityLossHead,
 )
-from anthos.scalable_growth import ScalableAnthos, RecurrentBlock, MoELayer
-from anthos.lifelong_learning import ExperienceReplayBuffer, ElasticWeightConsolidation, LifelongTrainer
-from anthos.self_improvement import SelfTeacher, IterativeRefinement
-from anthos.distributed_grid import DistributedGrid
-from anthos.knowledge_graph import AnthosKnowledgeGraph, GraphAugmentedGeneration
-from anthos.benchmark_suite import AnthosBenchmark, ContinuousBenchmarking
-from anthos.model_surgery import ModelSurgeon
-from anthos.deploy import AnthosDeployer
-from anthos.autonomous_agent import AutonomousImprovementAgent
-from anthos.community import CommunityModelHub, FederatedLearningCoordinator
-from anthos.self_destruct import ModelProtection
+from anthos.identity.scalable_growth import ScalableAnthos, RecurrentBlock, MoELayer
+from anthos.identity.lifelong_learning import ExperienceReplayBuffer, ElasticWeightConsolidation, LifelongTrainer
+from anthos.identity.self_improvement import SelfTeacher, IterativeRefinement
+from anthos.infrastructure.distributed_grid import DistributedGrid
+from anthos.memory.memory.knowledge_graph import AnthosKnowledgeGraph, GraphAugmentedGeneration
+from anthos.eval.benchmark_suite import AnthosBenchmark, ContinuousBenchmarking
+from anthos.train.model_surgery import ModelSurgeon
+from anthos.inference.deploy import AnthosDeployer
+from anthos.identity.autonomous_agent import AutonomousImprovementAgent
+from anthos.eval.community import CommunityModelHub, FederatedLearningCoordinator
+from anthos.identity.self_destruct import ModelProtection
 
 __version__ = "0.1.0"
 __author__  = "Tushae Thomas"

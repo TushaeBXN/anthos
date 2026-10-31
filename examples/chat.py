@@ -20,7 +20,7 @@ import torch
 from pathlib import Path
 
 from anthos import Anthos
-from anthos.configs import get_training_config
+from anthos.model.config import get_training_config
 
 # ── Args ──────────────────────────────────────────────────────────────────────
 

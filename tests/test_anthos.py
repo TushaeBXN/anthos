@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from anthos.main import (
+from anthos.train.trainer import (
     AnthosConfig, Anthos, ThoughtTokenPool,
     LTIInjection, _anthos_causal_mask, _anthos_rope_freqs,
 )
