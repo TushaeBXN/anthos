@@ -112,6 +112,9 @@ Re-running with the same `--run-name` resumes from the latest checkpoint in `che
 
 ## What is Anthos?
 
+> **Status: paused.** The sections below describe the design as built. Notes marked **Measured (2026-10-31)** record what the
+> tests actually showed, and they take precedence where they disagree with the design text.
+
 Anthos is a **Thought-Token Bifurcated Recurrent Transformer** — a new architecture class that separates *reasoning state* from *content state* into two parallel streams running through a shared recurrent core.
 
 Most language models collapse these two concerns into a single hidden state. Anthos keeps them apart by design.
@@ -150,6 +153,11 @@ A small pool of `n_thought` learnable vectors is prepended to the hidden state i
 
 Thought tokens attend to the **full sequence non-causally**. Sequence tokens attend to **all thoughts + their causal past**. At output, thought tokens are discarded — they leave no token trace, only shape what the sequence stream produces.
 
+> **Measured (2026-10-31) — causality.** With the default settings a later token can change the logits at earlier positions,
+> because the non-causal thoughts see the whole sequence, so training could learn from the future. The fix is `thought_prefix_only`
+> (thoughts read only the prompt prefix, plus a mixture-of-experts weight-order fix); every cl100k run used it. See
+> [`docs/CAUSALITY_FIX.md`](docs/CAUSALITY_FIX.md).
+
 ### Why this matters
 
 | Property | Standard Transformer | OpenMythos (RDT) | **Anthos** |
@@ -159,6 +167,10 @@ Thought tokens attend to the **full sequence non-causally**. Sequence tokens att
 | Working memory | None | Implicit LTI state | **Dedicated thought tokens** |
 | Content/reasoning separation | None | None | **Bifurcated by design** |
 | Compute-adaptive | No | ACT halting | **ACT on sequence; thoughts run every loop** |
+
+> **Measured (2026-10-31) — halting.** In the 126M run the halting gate almost never fires: at least 91% of tokens never halt, so
+> every token uses all loops. Correcting how the halting weights are assigned changed nothing at tiny scale.
+> **Thought tokens:** removing them scored the same or slightly better at tiny scale (4.707 against 4.728 to 4.786).
 
 ---
 
@@ -193,6 +205,10 @@ The recurrent block uses a **fine-grained Mixture-of-Experts** FFN with vectoriz
 - Load-balancing loss tracked automatically via `pop_aux_loss()`
 - Shared experts always active for cross-domain common patterns
 
+> **Measured (2026-10-31) — experts.** At 126M the router's entropy stayed at about 0.999 (1.0 is random) and the logged
+> top-1 expert share stayed at 7% to 10%, which points to experts that barely specialised. At tiny scale a plain feed-forward layer scored
+> 0.037 better than the experts (single seed, inside the noise).
+
 ### Memory Bank
 
 Each recurrent block contains a **512-slot persistent KV memory** — a differentiable external memory that thought tokens cross-attend every loop iteration. The memory state persists across generation steps, giving Anthos an RNN-style working memory layer on top of the transformer.
@@ -203,6 +219,11 @@ thoughts, memory_state = self.memory_bank(thoughts, memory_state)
 ```
 
 ---
+
+> **Measured (2026-10-31) — memory bank.** As wired, the bank could not learn to recall a fact between passes: the stored signal
+> was smaller than the thought tokens' by roughly five to nine orders of magnitude by the time it reached the output. With a direct path into the sequence
+> (`memory_to_sequence`, `memory_readout_norm`; both default off) it recalls one fact perfectly (100%), two facts partly
+> (16% to 23%) and four facts not at all. See `memory_recall.py`.
 
 ## Quick Start
 
@@ -253,7 +274,8 @@ out = model.generate(ids, max_new_tokens=128, n_loops=12)
 from anthos import Anthos, anthos_1b
 import torch.nn.functional as F
 
-model = Anthos(anthos_1b())
+cfg   = anthos_1b()
+model = Anthos(cfg)
 
 # Training step
 logits, aux_loss = model(input_ids, n_loops=8, return_aux=True)
@@ -318,7 +340,15 @@ The pipeline covers 60+ topics across 10 instruction templates. Responses are tr
 
 ---
 
+> **Measured (2026-10-31).** The cl100k runs used 4 loops for the first 3,000 steps and 8 loops after that, with the halting gate
+> effectively unused. Training with a random loop count made the model ignore its loops (the same accuracy at 1 loop as at 6),
+> so fixed loops were used. A bare looped block needed roughly 5,000 to 12,000 steps before a multi-step lookup skill appeared,
+> so short runs can look like failures.
+
 ## Model Variants
+
+> **Only two sizes were ever trained:** a 74M model (dim 512) and a 126M model (dim 768, 30,000 steps, 983M tokens). The larger
+> variants in the table are configurations; they have never been trained.
 
 | Variant | `dim` | Experts | Thought Tokens | Loop Iters | Context |
 |---|---|---|---|---|---|
@@ -625,8 +655,13 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 | **sft** | H100 SXM (RunPod) | SlimOrca (517k convos) | 1,000 | **44.9M** | loss 3.92 · first conversation fine-tune | Apr 25, 2026 |
 | **convo_smoke** | RTX 4090 (RunPod) | Claude Haiku teacher data (4k) | 51,000 | **44.9M** | loss ~1.90 · instruction following | May 2026 |
 | **qwen_lora** | T4 (Google Colab) | Claude Haiku teacher data (4k) | 1,536 | **1.5B** | loss ~1.87 · first live conversation | May 2026 |
+| **anthos-pt-1b** (cl100k) | Vast RTX 5090 | FineWeb-Edu 10BT | 30,500 | **74M** | held-out CE 4.138 · checkpoints deleted | Oct 2026 |
+| **anthos-pt-768** (cl100k) | Vast RTX 5090 | FineWeb-Edu 10BT | 30,000 | **126M** | held-out CE **4.014** · 983M tokens · causal (prefix-only) mode | Oct 2026 |
 
 **Best checkpoint:** `qwen_lora` final — loss ~1.87 (1.5B params, LoRA fine-tune on Qwen2.5-1.5B-Instruct)
+
+> The October 2026 rows use a different vocabulary and data, and they report held-out cross-entropy, not the training loss in the
+> older rows, so the two groups are not comparable. For the regular-model comparison, see the results table at the top of this page.
 
 ### First Test Run — April 22, 2026
 
@@ -714,6 +749,8 @@ Loss dropped and sentence structure emerged within 2,000 steps on CPU — archit
 
 ## Growth Roadmap
 
+> **Design targets only.** Nothing above 126M parameters has been trained, and the growth path itself has not been exercised.
+
 Anthos is designed to scale from 1B to 100B parameters **without reconstruction** — trained weights carry forward at every stage.
 
 ```python
@@ -734,6 +771,10 @@ model.expand_to_size("100B")        # full scale
 | **100B** | 8192 | 48 | 256 | 64 | 1M | 64× H100 |
 
 ### Identity Lock
+
+> **Measured (2026-10-31).** Identity hardening is a separate training tier (`identity_hardening`) and was not applied to the cl100k
+> pretraining runs. Its token IDs 32000 to 32007 are ordinary words in the cl100k vocabulary (for example "utility"), so it would
+> need new IDs before it could be used with that vocabulary.
 
 Anthos's identity — *created by Tushae Thomas (TushaeBXN), 2026* — is baked into the weights at four levels:
 
