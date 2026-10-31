@@ -1,43 +1,109 @@
 <div align="center">
-  <img src="assets/anthos-logo.jpg" alt="Anthos — Think in Streams" width="480"/>
+  <img src="assets/anthos-logo.jpg" alt="Anthos" width="480"/>
 
   <h1>Anthos</h1>
-  <p><strong>Think in Streams.</strong></p>
+  <p><strong>A from-scratch language-model research project.</strong></p>
   <p><em>Built by <a href="https://github.com/TushaeBXN">Brian Tushae Thomas</a> · 2026</em></p>
 
   [![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python&logoColor=white)](https://python.org)
   [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-EE4C2C?style=for-the-badge&logo=pytorch&logoColor=white)](https://pytorch.org)
   [![License](https://img.shields.io/badge/License-CC_BY--NC_4.0-green?style=for-the-badge)](LICENSE)
-  [![Architecture](https://img.shields.io/badge/Architecture-Bifurcated_Recurrent_Transformer-5B9BD5?style=for-the-badge)](docs/architecture.md)
-  [![Tests](https://img.shields.io/badge/Tests-18%2F18_passing-brightgreen?style=for-the-badge&logo=pytest&logoColor=white)](tests/test_anthos.py)
 
 </div>
 
 ---
 
-## Project status (2026-10-31)
+## Where the project stands (2026-10-31)
 
-**The active foundation is the regular model**: a plain decoder-only transformer in [`regular/`](regular/model.py), trained with
-[`train_regular.py`](train_regular.py) on the same shards and tokenizer. The 138M preset has 138,431,232 parameters.
+- **Active foundation: the regular model.** A plain decoder-only transformer in [`regular/`](regular/model.py), trained with
+  [`train_regular.py`](train_regular.py). The 138M preset has 138,431,232 parameters (checked against a formula in the tests).
+  No real training run of it has been done yet; it has only been smoke-tested at tiny size.
+- **Paused, kept intact: the Anthos architecture** (the Thought-Token Bifurcated Recurrent Transformer) in [`anthos/`](anthos/main.py)
+  and [`train.py`](train.py). Nothing was deleted. Its full documentation is further down this page.
+- **Tests:** 104 pass. 4 errors in `tests/test_identity_regression.py` come from a missing `ckpt_path` fixture and predate this work.
+
+## What the experiments showed
+
+Everything below is a single seed unless stated, and the small-scale runs say nothing certain about larger models.
+
+**1. Plain next-word loss at 126M parameters, about 1B tokens** (held-out cross-entropy, lower is better).
+
+| Step | Regular (12 layers, 135M incl. ~9M unused) | Anthos (126M) | Gap |
+|---|---|---|---|
+| 2,500 | 5.41 | 5.92 | 0.51 |
+| 5,000 | 4.72 | 4.80 | 0.083 |
+| 7,500 | 4.47 | 4.54 | 0.076 |
+| 10,000 | 4.318 | 4.382 | 0.065 |
+
+The regular model led at every checkpoint, trained about twice as fast, and the gap was narrowing. The regular run stopped at
+about step 11,000 of 30,000, so there is **no final head-to-head**. Anthos alone finished (step 30,000: 4.014).
+
+**2. Which Anthos parts matter, at tiny scale** (3.4M parameters, 2,000 steps, held-out loss). The three full-Anthos seeds span
+0.058, so differences smaller than that are noise.
+
+| Variant | Loss |
+|---|---|
+| Regular model | **4.597** |
+| Stripped loop (one dense block looped, nothing else) | 4.716 |
+| No thought tokens | 4.707 |
+| No per-loop adjustments | 4.732 |
+| Plain feed-forward instead of experts | 4.749 |
+| Plain (not energy-conserving) update | 4.754 |
+| Halting off / corrected | 4.765 / 4.785 |
+| No memory bank | 4.768 |
+| Full Anthos (3 seeds) | 4.728 / 4.750 / 4.786 |
+
+No removed part made the model clearly worse. On plain-text loss the regular model wins at this size.
+
+**3. Does the loop help when a task needs several steps in a row?** [`chain_probe.py`](chain_probe.py): follow k hops through a
+random map of 8 nodes (chance 12.5%), 30,000 steps, staged from 1 hop up to 4.
+
+| Model | 1 hop | 2 hops | 3 hops | 4 hops |
+|---|---|---|---|---|
+| One block looped 6 times (2.79M params) | 100% | 100% | 99% | 86% |
+| Regular, 3 layers (2.98M params) | 99% | 72% | 50% | 61% |
+
+Cutting the loops at test time made the looped model worse: 2-hop accuracy was 28% / 63% / 99% / 100% at 2 / 3 / 4 / 6 loops,
+and 3-hop was 99% only at 6 loops. A 7-layer regular model never learned even the first step, so it is not evidence either way.
+Training with a random loop count made the model ignore its loops (the same accuracy at 1 loop as at 6). The loops are capped
+at 6, and the lookup skill appears only after about 5,000 to 12,000 steps, so short runs mislead.
+
+**4. The in-model memory bank** ([`memory_recall.py`](memory_recall.py)). As first built it could not learn to recall. With a
+direct path from memory into the sequence it recalls one fact perfectly (100%), two facts partly (16% to 23%), and four facts
+not at all (chance). A per-slot write and key-lookup variant did not work and is left switched off.
+
+**Reading it together:** the looped block is the one Anthos idea with positive evidence. The experts, thought tokens, memory bank,
+per-loop adjustments and halting gate are unproven. If Anthos is resumed, start from the single looped block and add each other
+part back only if the multi-step probe shows it helps.
+
+## Quick start (regular model)
 
 ```bash
+pip install torch numpy tiktoken
+python make_pretrain_data.py --tokenizer tiktoken:cl100k_base --out data/pretrain_cl100k   # tokenise FineWeb-Edu shards
 python train_regular.py --preset 138m --data data/pretrain_cl100k --steps 30000 --run-name regular-138m
+python -m pytest -q tests/test_regular.py
 ```
 
-**The Anthos architecture is paused, not removed.** Everything under `anthos/`, its training script `train.py` and its
-checkpoints stay as they are, so it can be picked up later. Why it is paused, from the tests so far (all single-seed):
+Re-running with the same `--run-name` resumes from the latest checkpoint in `checkpoints/<run-name>/`.
 
-- At 126M parameters and about 1B tokens, the regular model scored lower held-out loss than the bigger Anthos at every
-  checkpoint (4.318 vs 4.382 at step 10,000; the gap was narrowing), and it trains about twice as fast. The comparison
-  stopped at step ~11,000 of 30,000, so there is no final head-to-head.
-- At tiny scale the experts, thought tokens, memory bank, per-loop adjustments and halting gate each scored the same as or
-  slightly worse than removing them (differences inside the seed spread of about 0.06).
-- The looped block itself held up on a task that needs several steps in a row (`chain_probe.py`): one block looped 6 times
-  scored 100 / 100 / 99 / 86% on 1 to 4 hops against 99 / 72 / 50 / 61% for a 3-layer regular model, and accuracy fell as
-  loops were cut. That is one seed on a synthetic task, with loops capped at 6.
-- The in-model memory bank holds about one fact (`memory_recall.py`).
+## Repo map
 
-If Anthos is resumed, build on the single looped block and add each other part back only if `chain_probe.py` shows it helps.
+| Path | What it is |
+|---|---|
+| `regular/`, `train_regular.py` | The active regular model and its trainer |
+| `anthos/`, `train.py` | The paused Anthos architecture and its trainer |
+| `ablate.py` | Tiny-scale ablation matrix (results in `results/ablation_small.jsonl`) |
+| `chain_probe.py`, `chain_ref.py` | Multi-step pointer-chasing probe and an ordinary-transformer reference |
+| `memory_recall.py` | Memory-bank recall probe |
+| `eval_ckpt.py`, `watch_run.py`, `launch_run.sh` | Checkpoint evaluation and run monitoring |
+| `make_pretrain_data.py`, `build_sft_cl100k.py`, `synth_*.py` | Data pipelines |
+| `docs/`, `TRAINING.md` | Anthos design notes and training guides (Anthos-era) |
+
+---
+
+> **Everything below documents the paused Anthos architecture.** It matches the code in `anthos/` but is not the active direction.
+> Dates and loss figures in the older sections are from April to May 2026 runs and are kept as history.
 
 ---
 
@@ -537,7 +603,7 @@ export_for_deployment(model, model_cfg, "exports/anthos-1b/", dtype="bfloat16")
 
 ---
 
-## Project Status
+## Anthos Project Status (historical, through May 2026)
 
 <div align="center">
   <img src="assets/smoke-test-results.png" alt="Anthos Smoke Test Results" width="700"/>
