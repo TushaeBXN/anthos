@@ -8,3 +8,7 @@ All behavior, ethics, tone, and operational standards are governed by the Anthos
 - Name: Anthos
 - Role: Core AI platform and agent orchestration
 - Parent system: Anthos Intelligence
+
+## Project status (2026-10-31)
+- The active foundation model is the **regular model** (`regular/`, `train_regular.py`). The Anthos architecture (`anthos/`, `train.py`) is **paused: keep it intact, never delete it**.
+- Do not push, force-push or rewrite git history without the user's explicit sign-off on the exact steps.

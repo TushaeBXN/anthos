@@ -15,6 +15,32 @@
 
 ---
 
+## Project status (2026-10-31)
+
+**The active foundation is the regular model**: a plain decoder-only transformer in [`regular/`](regular/model.py), trained with
+[`train_regular.py`](train_regular.py) on the same shards and tokenizer. The 138M preset has 138,431,232 parameters.
+
+```bash
+python train_regular.py --preset 138m --data data/pretrain_cl100k --steps 30000 --run-name regular-138m
+```
+
+**The Anthos architecture is paused, not removed.** Everything under `anthos/`, its training script `train.py` and its
+checkpoints stay as they are, so it can be picked up later. Why it is paused, from the tests so far (all single-seed):
+
+- At 126M parameters and about 1B tokens, the regular model scored lower held-out loss than the bigger Anthos at every
+  checkpoint (4.318 vs 4.382 at step 10,000; the gap was narrowing), and it trains about twice as fast. The comparison
+  stopped at step ~11,000 of 30,000, so there is no final head-to-head.
+- At tiny scale the experts, thought tokens, memory bank, per-loop adjustments and halting gate each scored the same as or
+  slightly worse than removing them (differences inside the seed spread of about 0.06).
+- The looped block itself held up on a task that needs several steps in a row (`chain_probe.py`): one block looped 6 times
+  scored 100 / 100 / 99 / 86% on 1 to 4 hops against 99 / 72 / 50 / 61% for a 3-layer regular model, and accuracy fell as
+  loops were cut. That is one seed on a synthetic task, with loops capped at 6.
+- The in-model memory bank holds about one fact (`memory_recall.py`).
+
+If Anthos is resumed, build on the single looped block and add each other part back only if `chain_probe.py` shows it helps.
+
+---
+
 ## What is Anthos?
 
 Anthos is a **Thought-Token Bifurcated Recurrent Transformer** — a new architecture class that separates *reasoning state* from *content state* into two parallel streams running through a shared recurrent core.
