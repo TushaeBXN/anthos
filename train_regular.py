@@ -1,7 +1,13 @@
-"""Pretrain the regular model on the pre-tokenised shards (same data and checkpoint conventions as train.py).
+"""Pretrain the regular model.
 
-    python train_regular.py --preset 138m --data data/pretrain_cl100k --steps 30000 --run-name regular-138m
-    python train_regular.py --preset tiny --vocab-size 8192 --data data/pretrain_small8k --steps 200   # smoke test
+    # Stream FineWeb-Edu from HuggingFace (no data prep needed)
+    python train_regular.py --streaming --steps 50000 --run-name regular-152m
+
+    # From pre-tokenised binary shards (faster I/O on repeat runs)
+    python train_regular.py --data data/pretrain_cl100k --steps 50000 --run-name regular-152m
+
+    # Smoke test
+    python train_regular.py --preset tiny --vocab-size 1024 --streaming --steps 200
 
 Checkpoints go to checkpoints/<run>/step_NNNNNN.pt and carry {"model", "opt", "step", "cfg"}; a rerun with the same
 --run-name resumes from the latest one.
@@ -50,6 +56,12 @@ def main():
     ap.add_argument("--preset", choices=sorted(PRESETS), default="138m")
     ap.add_argument("--vocab-size", type=int, default=None, help="override the preset's vocabulary size")
     ap.add_argument("--data", default="data/pretrain_cl100k")
+    ap.add_argument("--streaming", action="store_true",
+                    help="Stream FineWeb-Edu from HuggingFace instead of reading local binary shards")
+    ap.add_argument("--hf-dataset", default="HuggingFaceFW/fineweb-edu",
+                    help="HuggingFace dataset to stream (default: FineWeb-Edu)")
+    ap.add_argument("--hf-subset", default="sample-10BT",
+                    help="Dataset subset/config (default: sample-10BT)")
     ap.add_argument("--run-name", default="regular")
     ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--batch-size", type=int, default=16)
@@ -90,8 +102,12 @@ def main():
     print(f"params {model.num_params():,} (formula {Regular.expected_params(cfg):,}) on {device}; "
           f"{a.batch_size * a.grad_accum * a.seq_len:,} tokens/step", flush=True)
 
-    from anthos.data import get_bin_dataloader
-    loader = iter(get_bin_dataloader(a.data, a.seq_len, a.batch_size, num_workers=1, seed=a.seed + step))
+    from anthos.data import get_bin_dataloader, get_dataloader
+    if a.streaming:
+        loader = iter(get_dataloader(a.hf_dataset, split="train", seq_len=a.seq_len,
+                                     batch_size=a.batch_size, num_workers=0, subset=a.hf_subset))
+    else:
+        loader = iter(get_bin_dataloader(a.data, a.seq_len, a.batch_size, num_workers=1, seed=a.seed + step))
     use_amp = device.type == "cuda"
     log = open(run_dir / "train.log", "a")
     t0, toks = time.time(), 0
@@ -117,8 +133,9 @@ def main():
                    "tok_s": int(toks / (time.time() - t0))}
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
         if step % a.eval_every == 0 or step == a.steps:
-            rec = {"step": step, "heldout_ce": round(heldout_ce(model, a.data, a.seq_len, device), 4)}
-            print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
+            if not a.streaming and (Path(a.data) / "val.bin").exists():
+                rec = {"step": step, "heldout_ce": round(heldout_ce(model, a.data, a.seq_len, device), 4)}
+                print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
         if step % a.save_every == 0 or step == a.steps:
             torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "cfg": dataclasses.asdict(cfg)},
                        run_dir / f"step_{step:06d}.pt")
