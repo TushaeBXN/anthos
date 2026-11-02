@@ -75,6 +75,8 @@ def main():
     ap.add_argument("--save-every", type=int, default=2500)
     ap.add_argument("--eval-every", type=int, default=2500)
     ap.add_argument("--log-every", type=int, default=100)
+    ap.add_argument("--init-from", default=None,
+                    help="Path to a checkpoint to warm-start from (loads weights only, resets step and optimizer)")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="auto")
     a = ap.parse_args()
@@ -94,11 +96,16 @@ def main():
     run_dir = Path("checkpoints") / a.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     step = 0
-    ck = latest(run_dir)
-    if ck:
-        state = torch.load(ck, map_location=device, weights_only=False)
-        model.load_state_dict(state["model"]); opt.load_state_dict(state["opt"]); step = state["step"]
-        print(f"resumed from {ck} at step {step}", flush=True)
+    if a.init_from and not latest(run_dir):
+        state = torch.load(a.init_from, map_location=device, weights_only=False)
+        model.load_state_dict(state["model"])
+        print(f"warm-started weights from {a.init_from} (step/opt reset to 0)", flush=True)
+    else:
+        ck = latest(run_dir)
+        if ck:
+            state = torch.load(ck, map_location=device, weights_only=False)
+            model.load_state_dict(state["model"]); opt.load_state_dict(state["opt"]); step = state["step"]
+            print(f"resumed from {ck} at step {step}", flush=True)
     print(f"params {model.num_params():,} (formula {Regular.expected_params(cfg):,}) on {device}; "
           f"{a.batch_size * a.grad_accum * a.seq_len:,} tokens/step", flush=True)
 
