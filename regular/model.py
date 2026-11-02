@@ -18,9 +18,9 @@ class RegularConfig:
     n_layers:     int   = 12
     n_heads:      int   = 12
     n_kv_heads:   int   = 4
-    ffn_dim:      int   = 1536
+    ffn_dim:      int   = 2048
     max_seq_len:  int   = 1024
-    rope_theta:   float = 10000.0
+    rope_theta:   float = 500000.0
     norm_eps:     float = 1e-5
 
     @property
