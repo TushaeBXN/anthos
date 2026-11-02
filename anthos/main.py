@@ -233,6 +233,28 @@ class AnthosConfig:
     # Reference: Zhou et al. 2022 "Mixture-of-Experts with Expert Choice Routing"
     use_expert_choice: bool = False   # enable Expert Choice MoE routing
 
+    # ── maidacundo / Huginn improvements ─────────────────────────────────────
+
+    # Truncated BPTT: backprop through only the last bptt_k loop iterations.
+    # 0 = all loops are differentiable (default, existing behaviour).
+    # 4 = only loops [-4:] receive gradients; earlier loops are detached.
+    # Cuts activation memory roughly proportionally to bptt_k / max_loop_iters.
+    bptt_k: int = 0
+
+    # Poisson-Lognormal depth sampling: during training, sample the number of
+    # recurrent loops from LogNormal(depth_mu, 0.5) instead of always running
+    # max_loop_iters.  Teaches the model to be useful at any depth, which
+    # improves ACT halting decisions at inference time.
+    # Active only when depth_sampling=True AND n_loops is not explicitly passed.
+    # Disabled automatically in eval mode (inference).
+    depth_sampling: bool  = False
+    depth_mu:       float = 1.5    # log-mean; exp(1.5) ≈ 4.5 loops on average
+
+    # SandwichBlock post-norm (Huginn, arXiv:2502.05171): add a third RMSNorm
+    # after the residual connections in each TransformerBlock.  Stabilises the
+    # hidden state across many loop iterations at the cost of one extra norm.
+    sandwich_norm: bool = False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Normalization
@@ -1026,6 +1048,9 @@ class TransformerBlock(nn.Module):
         # Optional Mixture of Depths router
         self.mod_router = MoDRouter(cfg.dim, cfg.mod_capacity) if cfg.use_mod else None
 
+        # SandwichBlock post-norm: extra RMSNorm after residuals for loop stability
+        self.post_norm = RMSNorm(cfg.dim) if cfg.sandwich_norm else None
+
     def forward(
         self,
         x:                torch.Tensor,
@@ -1053,15 +1078,18 @@ class TransformerBlock(nn.Module):
                     ffn_out = self.ffn(self.ffn_norm(y))
                     a       = x_in.new_zeros(1)
                 return y + ffn_out, a
-            return self.mod_router(x, _block_fn, training=self.training)
-
-        x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key, n_thought_prefix, is_causal)
-        if self.use_moe:
-            ffn_out, aux = self.ffn(self.ffn_norm(x))
+            x, aux = self.mod_router(x, _block_fn, training=self.training)
         else:
-            ffn_out = self.ffn(self.ffn_norm(x))
-            aux     = x.new_zeros(1)
-        x = x + ffn_out
+            x = x + self.attn(self.attn_norm(x), freqs_cis, mask, kv_cache, cache_key, n_thought_prefix, is_causal)
+            if self.use_moe:
+                ffn_out, aux = self.ffn(self.ffn_norm(x))
+            else:
+                ffn_out = self.ffn(self.ffn_norm(x))
+                aux     = x.new_zeros(1)
+            x = x + ffn_out
+
+        if self.post_norm is not None:
+            x = self.post_norm(x)
         return x, aux
 
 
@@ -1301,7 +1329,13 @@ class AnthosRecurrentBlock(nn.Module):
                     zero for steps that did not execute (early termination or already halted).
                     Stable output contract — always present regardless of n_loops or early exit.
         """
-        n_loops = n_loops or self.cfg.max_loop_iters
+        if n_loops is None:
+            if self.cfg.depth_sampling and self.training:
+                # Sample loop depth from LogNormal(depth_mu, 0.5); clamp to [1, max].
+                raw     = torch.empty(1).normal_(self.cfg.depth_mu, 0.5).exp()
+                n_loops = max(1, min(int(raw.round().item()), self.cfg.max_loop_iters))
+            else:
+                n_loops = self.cfg.max_loop_iters
 
         B, T, D = h.shape
         halted       = torch.zeros(B, T,    device=h.device, dtype=torch.bool)
@@ -1346,6 +1380,11 @@ class AnthosRecurrentBlock(nn.Module):
                          and not self.cfg.use_diff_attn and not self.cfg.use_mod)
 
         for t in range(n_loops):
+            # Truncated BPTT: detach state before the window of differentiable loops.
+            if self.cfg.bptt_k > 0 and t < n_loops - self.cfg.bptt_k:
+                h       = h.detach()
+                thoughts = thoughts.detach()
+
             if frozen_in is not None:
                 if t >= len(frozen_in):
                     raise ValueError(
