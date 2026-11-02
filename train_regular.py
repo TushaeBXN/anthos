@@ -60,8 +60,8 @@ def main():
                     help="Stream FineWeb-Edu from HuggingFace instead of reading local binary shards")
     ap.add_argument("--hf-dataset", default="HuggingFaceFW/fineweb-edu",
                     help="HuggingFace dataset to stream (default: FineWeb-Edu)")
-    ap.add_argument("--hf-subset", default="sample-10BT",
-                    help="Dataset subset/config (default: sample-10BT)")
+    ap.add_argument("--hf-subset", default=None,
+                    help="Dataset subset/config (e.g. sample-10BT for FineWeb-Edu)")
     ap.add_argument("--run-name", default="regular")
     ap.add_argument("--steps", type=int, default=30000)
     ap.add_argument("--batch-size", type=int, default=16)

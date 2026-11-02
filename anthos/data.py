@@ -49,12 +49,11 @@ class PackedTextDataset(IterableDataset):
     def __iter__(self) -> Iterator[torch.Tensor]:
         from datasets import load_dataset
 
-        ds = load_dataset(
-            self.dataset_name,
-            self.subset,
-            split=self.split,
-            streaming=True,
-        )
+        load_kwargs = dict(split=self.split, streaming=True)
+        if self.subset:
+            ds = load_dataset(self.dataset_name, self.subset, **load_kwargs)
+        else:
+            ds = load_dataset(self.dataset_name, **load_kwargs)
 
         buffer: list[int] = []
         target = self.seq_len + 1   # +1 so we can split into input/labels
