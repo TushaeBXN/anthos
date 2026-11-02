@@ -90,23 +90,23 @@ def _get_top1_expert_weights(state_dict: dict, layer_prefix: str) -> dict | None
     for the expert whose L2 norm is highest (a proxy for the most-used expert).
     Returns {"gate": tensor, "up": tensor, "down": tensor} or None.
     """
-    # Look for keys like layer_prefix.ffn.experts.{N}.gate_proj.weight
+    # Keys: layer_prefix.ffn.routed_experts.{N}.gate/up/down.weight
     expert_keys: dict[int, dict] = {}
     for k, v in state_dict.items():
-        if layer_prefix + ".ffn.experts." not in k:
+        if layer_prefix + ".ffn.routed_experts." not in k:
             continue
         parts = k.split(".")
         try:
-            exp_idx = int(parts[parts.index("experts") + 1])
+            exp_idx = int(parts[parts.index("routed_experts") + 1])
         except (ValueError, IndexError):
             continue
         if exp_idx not in expert_keys:
             expert_keys[exp_idx] = {}
-        if "gate_proj" in k:
+        if ".gate." in k:
             expert_keys[exp_idx]["gate"] = v.float()
-        elif "up_proj" in k:
+        elif ".up." in k:
             expert_keys[exp_idx]["up"] = v.float()
-        elif "down_proj" in k:
+        elif ".down." in k:
             expert_keys[exp_idx]["down"] = v.float()
 
     if not expert_keys:
@@ -169,32 +169,97 @@ def export_to_gguf(
     writer.add_rope_freq_base(model_cfg.rope_theta)
     writer.add_vocab_size(model_cfg.vocab_size)
     writer.add_file_type(QUANT_TYPE.get(quant, 1))
+    # FFN intermediate dim: prelude/coda dense layers use 4/3 * dim ≈ 1024.
+    # MoE recurrent layer uses expert_dim=384; we zero-pad it to ffn_dim at export.
+    ffn_dim = getattr(model_cfg, "ffn_dim", None) or (dim * 4 // 3)
+    writer.add_feed_forward_length(ffn_dim)
+    # Store ffn_dim on model_cfg so _add_transformer_layer can access it
+    model_cfg._export_ffn_dim = ffn_dim
 
     # ── Tokenizer ────────────────────────────────────────────────────────────
     try:
-        from transformers import AutoTokenizer
-        tok = AutoTokenizer.from_pretrained(tokenizer_path)
-        tokens = [tok.decode([i], skip_special_tokens=False) for i in range(tok.vocab_size)]
-        scores = [0.0] * len(tokens)
-        token_types = [1 if tok.convert_ids_to_tokens(i) in tok.all_special_tokens
-                       else 0 for i in range(tok.vocab_size)]
+        import tiktoken
+
+        # GPT-2 bytes-to-unicode: every byte gets a unique printable char,
+        # so token strings are always distinct (no UTF-8 replacement collisions).
+        def _b2u():
+            bs = (list(range(ord("!"), ord("~") + 1))
+                  + list(range(ord("¡"), ord("¬") + 1))
+                  + list(range(ord("®"), ord("ÿ") + 1)))
+            cs = bs[:]
+            n = 0
+            for b in range(256):
+                if b not in bs:
+                    bs.append(b)
+                    cs.append(256 + n)
+                    n += 1
+            return {b: chr(c) for b, c in zip(bs, cs)}
+
+        byte_enc = _b2u()
+
+        def _bytes_to_str(raw: bytes) -> str:
+            return "".join(byte_enc[b] for b in raw)
+
+        enc = tiktoken.get_encoding("cl100k_base")
+        vocab_size = model_cfg.vocab_size  # 100352 for Anthos
+
+        # Build id→bytes map
+        id_to_bytes: dict[int, bytes] = {v: k for k, v in enc._mergeable_ranks.items()}
+        for tok_str, tok_id in enc._special_tokens.items():
+            id_to_bytes[tok_id] = tok_str.encode("utf-8")
+
+        token_strs = []
+        token_types_list = []
+        for i in range(vocab_size):
+            raw = id_to_bytes.get(i, f"\x00[UNK{i}]".encode())
+            token_strs.append(_bytes_to_str(raw))
+            # 1 = NORMAL, 3 = CONTROL (special tokens)
+            token_types_list.append(3 if i in enc._special_tokens.values() else 1)
+
+        # Reconstruct BPE merge rules from rank ordering
+        ranks = enc._mergeable_ranks
+        merges = []
+        for token_bytes, rank in sorted(ranks.items(), key=lambda x: x[1]):
+            if rank >= vocab_size or len(token_bytes) <= 1:
+                continue
+            best_pair = None
+            best_max = float("inf")
+            for i in range(1, len(token_bytes)):
+                left, right = token_bytes[:i], token_bytes[i:]
+                if left in ranks and right in ranks:
+                    mx = max(ranks[left], ranks[right])
+                    if mx < best_max:
+                        best_max = mx
+                        best_pair = (ranks[left], ranks[right])
+            if best_pair:
+                l, r = best_pair
+                if l < vocab_size and r < vocab_size:
+                    merges.append(f"{token_strs[l]} {token_strs[r]}")
+
+        scores = [0.0] * vocab_size
+        eot_id = enc._special_tokens.get("<|endoftext|>", 100257)
+
         writer.add_tokenizer_model("gpt2")
-        writer.add_token_list(tokens)
+        writer.add_token_list(token_strs)
         writer.add_token_scores(scores)
-        writer.add_token_types(token_types)
-        writer.add_bos_token_id(tok.bos_token_id or 1)
-        writer.add_eos_token_id(tok.eos_token_id or 2)
-        print(f"  [gguf] Tokenizer: {tok.vocab_size} tokens")
+        writer.add_token_types(token_types_list)
+        writer.add_token_merges(merges)
+        writer.add_bos_token_id(eot_id)
+        writer.add_eos_token_id(eot_id)
+        print(f"  [gguf] Tokenizer: {vocab_size} tokens, {len(merges)} merges (cl100k_base)")
     except Exception as e:
         print(f"  [gguf] Tokenizer export skipped: {e}")
 
     # ── Weight extraction ─────────────────────────────────────────────────────
     state_dict = model.state_dict()
 
-    def _tensor(t: torch.Tensor) -> torch.Tensor:
-        if quant in ("f16", "q4_0", "q4_1", "q4_k_m", "q8_0"):
-            return t.half().contiguous()
-        return t.float().contiguous()
+    def _tensor(t: torch.Tensor):
+        import numpy as np
+        t = t.detach().float()
+        # 1-D tensors (norms, biases) must stay f32; only quantize weight matrices
+        if t.ndim >= 2 and quant in ("f16", "q4_0", "q4_1", "q4_k_m", "q8_0"):
+            return t.half().numpy().astype(np.float16)
+        return t.numpy().astype(np.float32)
 
     # Token embedding
     embed = _extract_linear_weight(state_dict, "embed.weight")
@@ -203,7 +268,7 @@ def export_to_gguf(
         print("  [gguf] ✓ token embeddings")
 
     # Output norm + head
-    norm = _extract_linear_weight(state_dict, "coda_norm.weight")
+    norm = _extract_linear_weight(state_dict, "norm.weight")
     if norm is not None:
         writer.add_tensor("output_norm.weight", _tensor(norm))
     head_w = _extract_linear_weight(state_dict, "head.weight")
@@ -211,22 +276,24 @@ def export_to_gguf(
         writer.add_tensor("output.weight", _tensor(head_w))
         print("  [gguf] ✓ output head")
 
+    ffn_dim = getattr(model_cfg, "_export_ffn_dim", dim * 4 // 3)
+
     # Prelude blocks → LLaMA layers 0…prelude_layers-1
     for i in range(model_cfg.prelude_layers):
         pfx = f"prelude.{i}"
-        _add_transformer_layer(writer, state_dict, pfx, i, _tensor)
+        _add_transformer_layer(writer, state_dict, pfx, i, _tensor, ffn_dim=ffn_dim)
 
     # Recurrent block → one LLaMA layer
     recur_idx = model_cfg.prelude_layers
     pfx = "recurrent.block"
     _add_transformer_layer(writer, state_dict, pfx, recur_idx, _tensor,
-                           is_moe=True)
+                           is_moe=True, ffn_dim=ffn_dim)
 
     # Coda blocks
     for i in range(model_cfg.coda_layers):
         pfx = f"coda.{i}"
         layer_idx = model_cfg.prelude_layers + 1 + i
-        _add_transformer_layer(writer, state_dict, pfx, layer_idx, _tensor)
+        _add_transformer_layer(writer, state_dict, pfx, layer_idx, _tensor, ffn_dim=ffn_dim)
 
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
@@ -244,45 +311,59 @@ def _add_transformer_layer(
     layer_idx:  int,
     _tensor,
     is_moe:     bool = False,
+    ffn_dim:    int  = 0,
 ) -> None:
     """Add one transformer block's tensors to the GGUF writer."""
     li = layer_idx
 
-    # Attention norms
+    # Attention norms (Anthos uses attn_norm / ffn_norm)
     for norm_key, gguf_name in [
-        (f"{pfx}.norm1.weight",  f"blk.{li}.attn_norm.weight"),
-        (f"{pfx}.norm2.weight",  f"blk.{li}.ffn_norm.weight"),
+        (f"{pfx}.attn_norm.weight", f"blk.{li}.attn_norm.weight"),
+        (f"{pfx}.ffn_norm.weight",  f"blk.{li}.ffn_norm.weight"),
     ]:
         if norm_key in state_dict:
             writer.add_tensor(gguf_name, _tensor(state_dict[norm_key].float()))
 
-    # Attention QKV projections
+    # Attention QKV projections (Anthos uses wq/wk/wv/wo)
     for src, dst in [
-        (f"{pfx}.attn.q_proj.weight", f"blk.{li}.attn_q.weight"),
-        (f"{pfx}.attn.k_proj.weight", f"blk.{li}.attn_k.weight"),
-        (f"{pfx}.attn.v_proj.weight", f"blk.{li}.attn_v.weight"),
-        (f"{pfx}.attn.out_proj.weight", f"blk.{li}.attn_output.weight"),
+        (f"{pfx}.attn.wq.weight",  f"blk.{li}.attn_q.weight"),
+        (f"{pfx}.attn.wk.weight",  f"blk.{li}.attn_k.weight"),
+        (f"{pfx}.attn.wv.weight",  f"blk.{li}.attn_v.weight"),
+        (f"{pfx}.attn.wo.weight",  f"blk.{li}.attn_output.weight"),
     ]:
         if src in state_dict:
             writer.add_tensor(dst, _tensor(state_dict[src].float()))
 
     # FFN weights
     if is_moe:
-        # Extract top-1 expert FFN weights
+        # Extract top-1 routed expert FFN weights; zero-pad to ffn_dim if smaller
         expert = _get_top1_expert_weights(state_dict, pfx)
-        if expert:
+        if expert and ffn_dim > 0:
+            import numpy as np
             for key, dst in [
                 ("gate", f"blk.{li}.ffn_gate.weight"),
                 ("up",   f"blk.{li}.ffn_up.weight"),
-                ("down", f"blk.{li}.ffn_down.weight"),
             ]:
                 if key in expert:
-                    writer.add_tensor(dst, _tensor(expert[key]))
+                    w = expert[key]           # shape [expert_dim, dim]
+                    ed, d = w.shape
+                    if ed < ffn_dim:
+                        pad = torch.zeros(ffn_dim - ed, d, dtype=w.dtype)
+                        w = torch.cat([w, pad], dim=0)
+                    writer.add_tensor(dst, _tensor(w))
+            if "down" in expert:
+                w = expert["down"]            # shape [dim, expert_dim]
+                d, ed = w.shape
+                if ed < ffn_dim:
+                    pad = torch.zeros(d, ffn_dim - ed, dtype=w.dtype)
+                    w = torch.cat([w, pad], dim=1)
+                writer.add_tensor(f"blk.{li}.ffn_down.weight", _tensor(w))
     else:
+        # Anthos dense FFN uses gate/up/down (not gate_proj/up_proj/down_proj)
         for src, dst in [
-            (f"{pfx}.ffn.gate_proj.weight", f"blk.{li}.ffn_gate.weight"),
-            (f"{pfx}.ffn.up_proj.weight",   f"blk.{li}.ffn_up.weight"),
-            (f"{pfx}.ffn.down_proj.weight", f"blk.{li}.ffn_down.weight"),
+            (f"{pfx}.ffn.gate.weight", f"blk.{li}.ffn_gate.weight"),
+            (f"{pfx}.ffn.up.weight",   f"blk.{li}.ffn_up.weight"),
+            (f"{pfx}.ffn.down.weight", f"blk.{li}.ffn_down.weight"),
         ]:
             if src in state_dict:
                 writer.add_tensor(dst, _tensor(state_dict[src].float()))
@@ -318,6 +399,25 @@ def main():
     print(f"{'─'*60}\n")
 
     model_cfg, _ = get_training_config(args.tier)
+    # apply checkpoint-specific overrides when the tier defaults don't match
+    if args.tier == "proof":
+        ckpt_tmp = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        sd = ckpt_tmp["model"]
+        if "embed.weight" in sd:
+            model_cfg.vocab_size  = sd["embed.weight"].shape[0]
+            model_cfg.dim         = sd["embed.weight"].shape[1]
+        if "recurrent.loop_embeds" in sd:
+            model_cfg.max_loop_iters = sd["recurrent.loop_embeds"].shape[0]
+        if "recurrent.block.ffn.routed_experts.0.gate.weight" in sd:
+            model_cfg.expert_dim  = sd["recurrent.block.ffn.routed_experts.0.gate.weight"].shape[0]
+        if "freqs_cis" in sd:
+            head_dim = sd["freqs_cis"].shape[1] * 2
+            model_cfg.n_heads = model_cfg.dim // head_dim
+        if "prelude.0.attn.wk.weight" in sd:
+            kv_dim = sd["prelude.0.attn.wk.weight"].shape[0]
+            head_dim = model_cfg.dim // model_cfg.n_heads
+            model_cfg.n_kv_heads = kv_dim // head_dim
+        del ckpt_tmp
     model        = Anthos(model_cfg)
 
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)

@@ -1,0 +1,36 @@
+{
+ "tokenizer": "tiktoken:cl100k_base",
+ "specials": {
+  "<|system|>": 100277,
+  "<|user|>": 100278,
+  "<|thought|>": 100279,
+  "<|assistant|>": 100280,
+  "<|end|>": 100281,
+  "<|tool_call|>": 100282,
+  "<|tool_result|>": 100283,
+  "<|done|>": 100284,
+  "<|blocked|>": 100285,
+  "<|grade:0|>": 100286,
+  "<|grade:1|>": 100287,
+  "<|grade:2|>": 100288,
+  "<|grade:3|>": 100289,
+  "<|grade:4|>": 100290
+ },
+ "max_len": 512,
+ "seed": 0,
+ "train_examples": 10206,
+ "train_tokens": 2286648,
+ "val_examples": 200,
+ "val_tokens": 43453,
+ "sources": [
+  "data/sft_convo/merged.jsonl:1.0"
+ ],
+ "stats": {
+  "merged:read": 11760,
+  "merged:kept": 10406,
+  "merged:skip_too_long_or_bad": 1090,
+  "merged:skip_wrong_claim": 8,
+  "merged:skip_shape": 255,
+  "merged:skip_dup": 1
+ }
+}

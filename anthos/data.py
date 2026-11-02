@@ -2,8 +2,8 @@
 Anthos — Data pipeline
 
 Streams TinyStories (smoke/proof) or FineWeb-Edu (research) through
-a GPT-2 tokenizer, packs sequences to fill the full context window,
-and yields (input_ids, labels) batches ready for training.
+tiktoken cl100k_base (100352 vocab), packs sequences to fill the full
+context window, and yields (input_ids, labels) batches ready for training.
 
 Packing strategy:
   Rather than padding short stories to seq_len (wasteful), we concatenate
@@ -19,8 +19,9 @@ from torch.utils.data import IterableDataset, DataLoader
 
 class PackedTextDataset(IterableDataset):
     """
-    Streams a HuggingFace text dataset, tokenizes with GPT-2, and yields
-    packed (seq_len+1,) token tensors — no padding, no waste.
+    Streams a HuggingFace text dataset, tokenizes with tiktoken cl100k_base
+    (100352 vocab), and yields packed (seq_len+1,) token tensors — no padding,
+    no waste.
 
     The +1 allows input = tokens[:-1] and labels = tokens[1:] in one slice.
     """
@@ -40,10 +41,10 @@ class PackedTextDataset(IterableDataset):
         self.text_field   = text_field
         self.subset       = subset
 
-        # GPT-2 tokenizer — 50257 vocab, no padding needed
-        from transformers import AutoTokenizer
-        self.tok = AutoTokenizer.from_pretrained("gpt2")
-        self.eos = self.tok.eos_token_id   # 50256 — document separator
+        # cl100k_base — 100352 vocab, matches SFT tokenizer and model embedding table
+        import tiktoken
+        self.tok = tiktoken.get_encoding("cl100k_base")
+        self.eos = 100257   # <|endoftext|> in cl100k
 
     def __iter__(self) -> Iterator[torch.Tensor]:
         from datasets import load_dataset
@@ -60,7 +61,7 @@ class PackedTextDataset(IterableDataset):
 
         for example in ds:
             text   = example.get(self.text_field, "")
-            tokens = self.tok.encode(text, add_special_tokens=False)
+            tokens = self.tok.encode_ordinary(text)   # never emits special ids
             buffer.extend(tokens)
             buffer.append(self.eos)   # document boundary
 
@@ -77,7 +78,7 @@ class PackedTextDataset(IterableDataset):
 class LocalPackedTextDataset(IterableDataset):
     """
     Reads a local plain-text file where stories are separated by blank lines,
-    tokenizes with GPT-2, and yields packed (seq_len+1,) tensors.
+    tokenizes with tiktoken cl100k_base, and yields packed (seq_len+1,) tensors.
 
     Loops over the file indefinitely so training can run for any number of steps.
 
@@ -91,9 +92,9 @@ class LocalPackedTextDataset(IterableDataset):
         self.path    = path
         self.seq_len = seq_len
 
-        from transformers import AutoTokenizer
-        self.tok = AutoTokenizer.from_pretrained("gpt2")
-        self.eos = self.tok.eos_token_id
+        import tiktoken
+        self.tok = tiktoken.get_encoding("cl100k_base")
+        self.eos = 100257   # <|endoftext|> in cl100k
 
     def __iter__(self) -> Iterator[torch.Tensor]:
         target = self.seq_len + 1
@@ -108,7 +109,7 @@ class LocalPackedTextDataset(IterableDataset):
         # Loop indefinitely so training never runs out of data
         while True:
             for story in stories:
-                tokens = self.tok.encode(story, add_special_tokens=False)
+                tokens = self.tok.encode_ordinary(story)
                 buffer.extend(tokens)
                 buffer.append(self.eos)
 

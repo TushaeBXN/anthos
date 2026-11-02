@@ -169,8 +169,8 @@ class EAFTLoss(nn.Module):
         # tensor (~400 MB for B=4,T=512,V=50262).  Chunking over positions
         # keeps peak activation memory proportional to chunk_size instead of
         # B*T, at no accuracy cost and negligible throughput overhead.
-        logits_2d = logits.view(B * T, V)
-        labels_1d = labels.view(B * T)
+        logits_2d = logits.reshape(B * T, V)
+        labels_1d = labels.reshape(B * T)
         N = B * T
 
         if self.chunk_size >= N:

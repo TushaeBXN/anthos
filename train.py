@@ -288,6 +288,7 @@ def train(
     else:
         device = "cpu"
     ckpt_dir = Path("checkpoints") / train_cfg.run_name
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     # Determine hardware label for telemetry sidecar
     if torch.cuda.is_available():
@@ -576,7 +577,7 @@ def train(
     if is_sft and tier != "code" and Path("data/anthos_tokenizer").exists():
         tok_path = "data/anthos_tokenizer"
     else:
-        tok_path = "gpt2"  # proof checkpoint vocab is 50257, must match
+        tok_path = "tiktoken:cl100k_base"  # all tiers use cl100k (100352 vocab)
 
     if sft_data:
         from anthos.sft_cl100k import get_sft_bin_dataloader
