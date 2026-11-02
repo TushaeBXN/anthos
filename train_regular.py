@@ -106,8 +106,11 @@ def main():
     if a.streaming:
         loader = iter(get_dataloader(a.hf_dataset, split="train", seq_len=a.seq_len,
                                      batch_size=a.batch_size, num_workers=0, subset=a.hf_subset))
+        val_loader = get_dataloader(a.hf_dataset, split="validation", seq_len=a.seq_len,
+                                    batch_size=a.batch_size, num_workers=0, subset=a.hf_subset)
     else:
         loader = iter(get_bin_dataloader(a.data, a.seq_len, a.batch_size, num_workers=1, seed=a.seed + step))
+        val_loader = None
     use_amp = device.type == "cuda"
     log = open(run_dir / "train.log", "a")
     t0, toks = time.time(), 0
@@ -133,7 +136,21 @@ def main():
                    "tok_s": int(toks / (time.time() - t0))}
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
         if step % a.eval_every == 0 or step == a.steps:
-            if not a.streaming and (Path(a.data) / "val.bin").exists():
+            if a.streaming and val_loader is not None:
+                model.eval()
+                val_losses = []
+                with torch.no_grad():
+                    for val_batch in val_loader:
+                        val_batch = val_batch.to(device)
+                        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+                            val_logits = model(val_batch[:, :-1])
+                        val_losses.append(F.cross_entropy(val_logits.float().flatten(0, 1), val_batch[:, 1:].flatten()).item())
+                        if len(val_losses) >= 32:
+                            break
+                model.train()
+                rec = {"step": step, "val_loss": round(float(np.mean(val_losses)), 4)}
+                print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
+            elif not a.streaming and (Path(a.data) / "val.bin").exists():
                 rec = {"step": step, "heldout_ce": round(heldout_ce(model, a.data, a.seq_len, device), 4)}
                 print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
         if step % a.save_every == 0 or step == a.steps:
