@@ -61,6 +61,8 @@ def main():
     ap.add_argument("--checkpoint", default=None)
     ap.add_argument("--run", default="regular-ts")
     ap.add_argument("--prompt", default=None)
+    ap.add_argument("--instruct", action="store_true",
+                    help="Wrap prompt in SFT instruction format (### Instruction / ### Response)")
     ap.add_argument("--max-new", type=int, default=200)
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=50)
@@ -82,10 +84,16 @@ def main():
     eos = 100257
 
     def run_prompt(text: str):
+        if a.instruct:
+            text = f"### Instruction:\n{text}\n\n### Response:\n"
         ids = tok.encode_ordinary(text)
         out = generate(model, ids, a.max_new, a.temperature, a.top_k, device)
-        # decode, strip the EOS if present
         result = tok.decode([t for t in out if t < eos])
+        if a.instruct:
+            # Print only the response part
+            marker = "### Response:\n"
+            idx = result.find(marker)
+            result = result[idx + len(marker):] if idx != -1 else result
         print(result)
         print()
 
