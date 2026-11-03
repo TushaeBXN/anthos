@@ -29,7 +29,8 @@ from regular import PRESETS, Regular
 def lr_at(step: int, a) -> float:
     if step < a.warmup:
         return a.lr * (step + 1) / a.warmup
-    t = (step - a.warmup) / max(1, a.steps - a.warmup)
+    sched = a.schedule_steps if a.schedule_steps else a.steps
+    t = (step - a.warmup) / max(1, sched - a.warmup)
     return a.lr * (a.min_lr_frac + (1 - a.min_lr_frac) * 0.5 * (1 + math.cos(math.pi * min(1.0, t))))
 
 
@@ -75,6 +76,10 @@ def main():
     ap.add_argument("--save-every", type=int, default=2500)
     ap.add_argument("--eval-every", type=int, default=2500)
     ap.add_argument("--log-every", type=int, default=100)
+    ap.add_argument("--schedule-steps", type=int, default=None,
+                    help="Total steps used for cosine LR decay (default: same as --steps). "
+                         "When extending a run, pass the original --steps here to avoid an LR restart. "
+                         "e.g. original run was --steps 10000, extension: --steps 30000 --schedule-steps 30000")
     ap.add_argument("--init-from", default=None,
                     help="Path to a checkpoint to warm-start from (loads weights only, resets step and optimizer)")
     ap.add_argument("--seed", type=int, default=0)
