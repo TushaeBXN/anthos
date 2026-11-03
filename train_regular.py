@@ -142,27 +142,32 @@ def main():
             rec = {"step": step, "loss": round(total, 4), "gnorm": round(gnorm, 3), "lr": round(opt.param_groups[0]["lr"], 8),
                    "tok_s": int(toks / (time.time() - t0))}
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
+        if step % a.save_every == 0 or step == a.steps:
+            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "cfg": dataclasses.asdict(cfg)},
+                       run_dir / f"step_{step:06d}.pt")
         if step % a.eval_every == 0 or step == a.steps:
             if a.streaming and val_loader is not None:
                 model.eval()
                 val_losses = []
-                with torch.no_grad():
-                    for val_batch in val_loader:
-                        val_batch = val_batch.to(device)
-                        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
-                            val_logits = model(val_batch[:, :-1])
-                        val_losses.append(F.cross_entropy(val_logits.float().flatten(0, 1), val_batch[:, 1:].flatten()).item())
-                        if len(val_losses) >= 32:
-                            break
+                try:
+                    with torch.no_grad():
+                        for val_batch in val_loader:
+                            val_batch = val_batch.to(device)
+                            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
+                                val_logits = model(val_batch[:, :-1])
+                            val_losses.append(F.cross_entropy(val_logits.float().flatten(0, 1), val_batch[:, 1:].flatten()).item())
+                            if len(val_losses) >= 32:
+                                break
+                except ValueError as e:
+                    print(f"EVAL skipped (no validation split: {e})", flush=True)
+                    val_loader = None
                 model.train()
-                rec = {"step": step, "val_loss": round(float(np.mean(val_losses)), 4)}
-                print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
+                if val_losses:
+                    rec = {"step": step, "val_loss": round(float(np.mean(val_losses)), 4)}
+                    print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
             elif not a.streaming and (Path(a.data) / "val.bin").exists():
                 rec = {"step": step, "heldout_ce": round(heldout_ce(model, a.data, a.seq_len, device), 4)}
                 print("EVAL", json.dumps(rec), flush=True); log.write("EVAL " + json.dumps(rec) + "\n"); log.flush()
-        if step % a.save_every == 0 or step == a.steps:
-            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "cfg": dataclasses.asdict(cfg)},
-                       run_dir / f"step_{step:06d}.pt")
     print("RUN_EXIT complete", flush=True); log.write("RUN_EXIT complete\n"); log.close()
 
 
