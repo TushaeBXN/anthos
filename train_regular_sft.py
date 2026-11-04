@@ -80,12 +80,28 @@ DATASET_CONFIGS = {
     "alpaca":      ("yahma/alpaca-cleaned",           "train", format_alpaca),
     "dolly":       ("databricks/databricks-dolly-15k", "train", format_dolly),
     "openhermes":  ("teknium/OpenHermes-2.5",          "train", format_openhermes),
+    "distill":     None,  # local JSONL — path set via --distill-data
 }
 
 
-def load_examples(dataset_names: list[str]) -> list[tuple[str, str]]:
+def load_examples(dataset_names: list[str], distill_data: str | None = None) -> list[tuple[str, str]]:
     examples = []
     for name in dataset_names:
+        if name == "distill":
+            if not distill_data:
+                raise ValueError("--distill-data path required when using --datasets distill")
+            import json as _json
+            print(f"Loading distill dataset from {distill_data}...", flush=True)
+            before = len(examples)
+            with open(distill_data) as f:
+                for line in f:
+                    ex = _json.loads(line)
+                    inst = ex.get("instruction", "").strip()
+                    resp = ex.get("response", "").strip()
+                    if inst and resp:
+                        examples.append((inst, resp))
+            print(f"  +{len(examples) - before} examples", flush=True)
+            continue
         hf_id, split, fmt = DATASET_CONFIGS[name]
         print(f"Loading {name} ({hf_id})...", flush=True)
         ds = load_dataset(hf_id, split=split)
@@ -165,6 +181,8 @@ def main():
     ap.add_argument("--datasets", nargs="+", default=["alpaca", "dolly"],
                     choices=list(DATASET_CONFIGS.keys()),
                     help="One or more SFT datasets to mix")
+    ap.add_argument("--distill-data", default=None,
+                    help="Path to distillation JSONL (required when --datasets includes distill)")
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=4)
@@ -211,7 +229,7 @@ def main():
     print(f"params {model.num_params():,} on {device}", flush=True)
 
     tok = tiktoken.get_encoding("cl100k_base")
-    examples = load_examples(a.datasets)
+    examples = load_examples(a.datasets, distill_data=a.distill_data)
     loader = batches(tok, examples, a.seq_len, a.batch_size, seed=a.seed)
     use_amp = device.type == "cuda"
     log = open(run_dir / "train.log", "a")
