@@ -30,7 +30,8 @@ class RegularConfig:
 
 PRESETS = {
     "tiny": RegularConfig(vocab_size=1024, dim=64, n_layers=2, n_heads=4, n_kv_heads=2, ffn_dim=128, max_seq_len=128),
-    "138m": RegularConfig(),                                           # 138,431,232 parameters with the 100K vocabulary
+    "138m": RegularConfig(),                                           # 152,587,008 params with 100K vocab
+    "500m": RegularConfig(dim=1024, n_layers=26, n_heads=16, n_kv_heads=4, ffn_dim=4096, max_seq_len=2048),  # 498,127,872 params
 }
 
 
