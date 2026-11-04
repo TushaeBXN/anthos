@@ -134,7 +134,7 @@ def main():
             batch = next(loader).to(device)
             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
                 logits = model(batch[:, :-1])
-            loss = F.cross_entropy(logits.float().flatten(0, 1), batch[:, 1:].flatten()) / a.grad_accum
+            loss = F.cross_entropy(logits.flatten(0, 1), batch[:, 1:].flatten()) / a.grad_accum
             loss.backward()
             total += loss.item()
             toks += batch[:, 1:].numel()
@@ -160,7 +160,7 @@ def main():
                             val_batch = val_batch.to(device)
                             with torch.autocast(device.type, dtype=torch.bfloat16, enabled=use_amp):
                                 val_logits = model(val_batch[:, :-1])
-                            val_losses.append(F.cross_entropy(val_logits.float().flatten(0, 1), val_batch[:, 1:].flatten()).item())
+                            val_losses.append(F.cross_entropy(val_logits.flatten(0, 1), val_batch[:, 1:].flatten()).item())
                             if len(val_losses) >= 32:
                                 break
                 except ValueError as e:
