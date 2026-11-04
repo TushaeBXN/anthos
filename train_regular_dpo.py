@@ -175,10 +175,10 @@ def batches(tok: tiktoken.Encoding, examples: list, seq_len: int, batch_size: in
 
 def compute_logps(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Mean log-prob over non-masked positions (per example in batch)."""
-    log_probs = F.log_softmax(logits.float(), dim=-1)
+    log_probs = F.log_softmax(logits, dim=-1)          # stay in bfloat16; avoid 3 GB float32 cast
     mask      = labels != -100
     tgt       = labels.clone(); tgt[~mask] = 0
-    token_lp  = log_probs.gather(2, tgt.unsqueeze(-1)).squeeze(-1)
+    token_lp  = log_probs.gather(2, tgt.unsqueeze(-1)).squeeze(-1).float()
     return (token_lp * mask).sum(-1) / mask.sum(-1).clamp(min=1)
 
 
