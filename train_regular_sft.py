@@ -237,7 +237,7 @@ def main():
         if not math.isfinite(total):
             raise SystemExit(f"loss is {total} at step {step}: stopping")
         if step % a.log_every == 0:
-            rec = {"step": step, "loss": round(total * a.grad_accum, 4), "gnorm": round(gnorm, 3),
+            rec = {"step": step, "loss": round(total, 4), "gnorm": round(gnorm, 3),
                    "lr": round(opt.param_groups[0]["lr"], 8),
                    "resp_tok_s": int(resp_toks / (time.time() - t0))}
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
