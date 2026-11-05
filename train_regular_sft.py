@@ -76,32 +76,69 @@ def format_openhermes(ex: dict) -> tuple[str, str] | None:
     return user.strip(), asst.strip()
 
 
+def _parse_local_line(line: str) -> tuple[str, str] | None:
+    """Parse one JSONL line — handles {instruction,response} and ShareGPT {conversations} formats."""
+    try:
+        ex = json.loads(line)
+    except Exception:
+        return None
+    # ShareGPT format: {conversations: [{from, value}]}
+    if "conversations" in ex:
+        convs = ex["conversations"]
+        system = next((c.get("value", "") for c in convs if c.get("from") == "system"), "")
+        human  = next((c.get("value", "") for c in convs if c.get("from") in ("human", "user")), None)
+        gpt    = next((c.get("value", "") for c in convs if c.get("from") in ("gpt", "assistant")), None)
+        if not human or not gpt:
+            return None
+        inst = (system.strip() + "\n\n" + human.strip()).strip() if system else human.strip()
+        return inst, gpt.strip()
+    # Flat format: {instruction, response} or {instruction, output}
+    inst = ex.get("instruction", "").strip()
+    resp = ex.get("response", ex.get("output", "")).strip()
+    if inst and resp:
+        return inst, resp
+    return None
+
+
 DATASET_CONFIGS = {
     "alpaca":      ("yahma/alpaca-cleaned",           "train", format_alpaca),
     "dolly":       ("databricks/databricks-dolly-15k", "train", format_dolly),
     "openhermes":  ("teknium/OpenHermes-2.5",          "train", format_openhermes),
-    "distill":     None,  # local JSONL — path set via --distill-data
+    "distill":     None,  # local JSONL — path set via --distill-data (kept for back-compat)
+    "local":       None,  # one or more local JSONL paths — set via --local-data
 }
 
 
-def load_examples(dataset_names: list[str], distill_data: str | None = None) -> list[tuple[str, str]]:
+def load_examples(dataset_names: list[str], distill_data: str | None = None,
+                  local_data: list[str] | None = None) -> list[tuple[str, str]]:
     examples = []
     for name in dataset_names:
         if name == "distill":
-            if not distill_data:
+            paths = [distill_data] if distill_data else []
+            if not paths:
                 raise ValueError("--distill-data path required when using --datasets distill")
-            import json as _json
-            print(f"Loading distill dataset from {distill_data}...", flush=True)
-            before = len(examples)
-            with open(distill_data) as f:
-                for line in f:
-                    ex = _json.loads(line)
-                    inst = ex.get("instruction", "").strip()
-                    resp = ex.get("response", "").strip()
-                    if inst and resp:
-                        examples.append((inst, resp))
-            print(f"  +{len(examples) - before} examples", flush=True)
+        elif name == "local":
+            paths = local_data or []
+            if not paths:
+                raise ValueError("--local-data path(s) required when using --datasets local")
+        else:
+            paths = []
+
+        if paths:
+            for path in paths:
+                print(f"Loading local JSONL from {path}...", flush=True)
+                before = len(examples)
+                with open(path) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        result = _parse_local_line(line)
+                        if result:
+                            examples.append(result)
+                print(f"  +{len(examples) - before} examples", flush=True)
             continue
+
         hf_id, split, fmt = DATASET_CONFIGS[name]
         print(f"Loading {name} ({hf_id})...", flush=True)
         ds = load_dataset(hf_id, split=split)
@@ -183,6 +220,9 @@ def main():
                     help="One or more SFT datasets to mix")
     ap.add_argument("--distill-data", default=None,
                     help="Path to distillation JSONL (required when --datasets includes distill)")
+    ap.add_argument("--local-data", nargs="+", default=None, metavar="PATH",
+                    help="One or more local JSONL paths (required when --datasets includes local). "
+                         "Supports {instruction,response} and ShareGPT {conversations} formats.")
     ap.add_argument("--steps", type=int, default=2000)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--grad-accum", type=int, default=4)
@@ -229,7 +269,7 @@ def main():
     print(f"params {model.num_params():,} on {device}", flush=True)
 
     tok = tiktoken.get_encoding("cl100k_base")
-    examples = load_examples(a.datasets, distill_data=a.distill_data)
+    examples = load_examples(a.datasets, distill_data=a.distill_data, local_data=a.local_data)
     loader = batches(tok, examples, a.seq_len, a.batch_size, seed=a.seed)
     use_amp = device.type == "cuda"
     log = open(run_dir / "train.log", "a")
