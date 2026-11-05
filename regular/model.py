@@ -41,7 +41,8 @@ class RMSNorm(nn.Module):
         self.weight, self.eps = nn.Parameter(torch.ones(dim)), eps
 
     def forward(self, x):
-        return self.weight * (x.float() * torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
+        xf = x.float()
+        return self.weight * (xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)).type_as(x)
 
 
 def rope_table(head_dim: int, max_len: int, theta: float):
