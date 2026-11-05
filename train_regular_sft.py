@@ -76,6 +76,56 @@ def format_openhermes(ex: dict) -> tuple[str, str] | None:
     return user.strip(), asst.strip()
 
 
+def format_openorca(ex: dict) -> tuple[str, str] | None:
+    system = ex.get("system_prompt", "").strip()
+    question = ex.get("question", "").strip()
+    response = ex.get("response", "").strip()
+    if not question or not response:
+        return None
+    inst = (system + "\n\n" + question).strip() if system else question
+    return inst, response
+
+
+def format_tulu_code(ex: dict) -> tuple[str, str] | None:
+    messages = ex.get("messages", [])
+    user = next((m.get("content", "") for m in messages if m.get("role") == "user"), None)
+    asst = next((m.get("content", "") for m in messages if m.get("role") == "assistant"), None)
+    if not user or not asst:
+        return None
+    return user.strip(), asst.strip()
+
+
+def format_hermes_agent(ex: dict) -> tuple[str, str] | None:
+    convs = ex.get("conversations", [])
+    # Skip system and tool turns — take first human → gpt exchange only
+    human = next((c.get("value", "") for c in convs if c.get("from") == "human"), None)
+    gpt   = next((c.get("value", "") for c in convs if c.get("from") == "gpt"), None)
+    if not human or not gpt:
+        return None
+    # Strip <think> blocks if present — keep the action/response only
+    import re as _re
+    gpt_clean = _re.sub(r"<think>.*?</think>", "", gpt, flags=_re.DOTALL).strip()
+    if not gpt_clean:
+        gpt_clean = gpt.strip()
+    return human.strip(), gpt_clean
+
+
+def format_math_reasoning(ex: dict) -> tuple[str, str] | None:
+    prompt    = ex.get("prompt", "").strip()
+    reasoning = ex.get("reasoning", "").strip()
+    if not prompt or not reasoning:
+        return None
+    return prompt, reasoning
+
+
+def format_acereason_code(ex: dict) -> tuple[str, str] | None:
+    inp = ex.get("input", "").strip()
+    out = ex.get("output", "").strip()
+    if not inp or not out:
+        return None
+    return inp, out
+
+
 def _parse_local_line(line: str) -> tuple[str, str] | None:
     """Parse one JSONL line — handles {instruction,response} and ShareGPT {conversations} formats."""
     try:
@@ -101,11 +151,19 @@ def _parse_local_line(line: str) -> tuple[str, str] | None:
 
 
 DATASET_CONFIGS = {
-    "alpaca":      ("yahma/alpaca-cleaned",           "train", format_alpaca),
-    "dolly":       ("databricks/databricks-dolly-15k", "train", format_dolly),
-    "openhermes":  ("teknium/OpenHermes-2.5",          "train", format_openhermes),
-    "distill":     None,  # local JSONL — path set via --distill-data (kept for back-compat)
-    "local":       None,  # one or more local JSONL paths — set via --local-data
+    # ── existing ──────────────────────────────────────────────────────────────
+    "alpaca":        ("yahma/alpaca-cleaned",                              "train",              format_alpaca),
+    "dolly":         ("databricks/databricks-dolly-15k",                   "train",              format_dolly),
+    "openhermes":    ("teknium/OpenHermes-2.5",                            "train",              format_openhermes),
+    # ── 1B SFT additions ─────────────────────────────────────────────────────
+    "openorca":      ("Open-Orca/OpenOrca",                                "train",              format_openorca),
+    "tulu_code":     ("allenai/tulu-3-sft-personas-code",                  "train",              format_tulu_code),
+    "hermes_agent":  ("lambda/hermes-agent-reasoning-traces",              "train_kimi",         format_hermes_agent),
+    "math_cot":      ("Scale-or-Reason/math-reasoning-ift-pairs",          "reasoning_ift_pairs",format_math_reasoning),
+    "ace_code":      ("Superskyyy/AceReason-1.1-SFT-Code-Stratified-Downsampled-650k", "train", format_acereason_code),
+    # ── local JSONL ───────────────────────────────────────────────────────────
+    "distill":       None,  # local JSONL — path set via --distill-data (kept for back-compat)
+    "local":         None,  # one or more local JSONL paths — set via --local-data
 }
 
 
