@@ -126,6 +126,26 @@ def format_acereason_code(ex: dict) -> tuple[str, str] | None:
     return inp, out
 
 
+def format_cybersec_qa(ex: dict) -> tuple[str, str] | None:
+    q = ex.get("question", ex.get("prompt", "")).strip()
+    a = ex.get("answer", ex.get("response", ex.get("output", ""))).strip()
+    if not q or not a:
+        return None
+    return q, a
+
+
+def format_hermes_funcall(ex: dict) -> tuple[str, str] | None:
+    """NousResearch hermes-function-calling-v1 — teaches JSON tool-call format."""
+    convs = ex.get("conversations", [])
+    system = next((c.get("value", "") for c in convs if c.get("from") == "system"), "")
+    human  = next((c.get("value", "") for c in convs if c.get("from") in ("human", "user")), None)
+    gpt    = next((c.get("value", "") for c in convs if c.get("from") in ("gpt", "assistant")), None)
+    if not human or not gpt:
+        return None
+    inst = (system.strip() + "\n\n" + human.strip()).strip() if system else human.strip()
+    return inst, gpt.strip()
+
+
 def _parse_local_line(line: str) -> tuple[str, str] | None:
     """Parse one JSONL line — handles {instruction,response} and ShareGPT {conversations} formats."""
     try:
@@ -162,6 +182,8 @@ DATASET_CONFIGS = {
     "math_cot":      ("Scale-or-Reason/math-reasoning-ift-pairs",          "reasoning_ift_pairs",format_math_reasoning),
     "ace_code":      ("Superskyyy/AceReason-1.1-SFT-Code-Stratified-Downsampled-650k", "train", format_acereason_code),
     # ── local JSONL ───────────────────────────────────────────────────────────
+    "cybersec_qa":   ("rezaduty/cybersecurity-qa-v2",           "train", format_cybersec_qa),
+    "funcall":       ("NousResearch/hermes-function-calling-v1", "train", format_hermes_funcall),
     "distill":       None,  # local JSONL — path set via --distill-data (kept for back-compat)
     "local":         None,  # one or more local JSONL paths — set via --local-data
 }

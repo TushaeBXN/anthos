@@ -79,11 +79,16 @@ python "$DATA_DIR/generate_awesome_training_data.py" \
     echo "  WARNING: awesome training generation failed — skipping"
 }
 
+# ── Security + agent reasoning (pure Python, no API) ─────────────────────────
+echo "[9/9] Security + agent reasoning examples..."
+python "$DATA_DIR/generate_security_agent_data.py" \
+    --out "$OUT_DIR/security_agent_sft.jsonl"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 echo "=== Generated files ==="
 for f in identity_hardening self_knowledge code_sft hardware_security \
-          math_ml_sft multilingual_sft applied_sft awesome_knowledge; do
+          math_ml_sft multilingual_sft applied_sft awesome_knowledge security_agent_sft; do
     path="$OUT_DIR/${f}.jsonl"
     if [ -f "$path" ]; then
         count=$(wc -l < "$path")
@@ -109,6 +114,7 @@ echo "        $OUT_DIR/math_ml_sft.jsonl \\"
 echo "        $OUT_DIR/multilingual_sft.jsonl \\"
 echo "        $OUT_DIR/applied_sft.jsonl \\"
 echo "        $OUT_DIR/awesome_knowledge.jsonl \\"
+echo "        $OUT_DIR/security_agent_sft.jsonl \\"
 echo "    --steps 3000 --lr 2e-5 --seq-len 1024 \\"
 echo "    --batch-size 8 --grad-accum 8 \\"
 echo "    --save-every 500"
