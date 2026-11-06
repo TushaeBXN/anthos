@@ -148,8 +148,12 @@ def main():
                    "tok_s": int(toks / (time.time() - t0))}
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
         if step % a.save_every == 0 or step == a.steps:
+            ck_path = run_dir / f"step_{step:06d}.pt"
             torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "cfg": dataclasses.asdict(cfg)},
-                       run_dir / f"step_{step:06d}.pt")
+                       ck_path)
+            # Keep only the latest checkpoint to avoid filling disk
+            for old in sorted(run_dir.glob("step_*.pt"))[:-1]:
+                old.unlink()
         if step % a.eval_every == 0 or step == a.steps:
             if a.streaming and val_loader is not None:
                 model.eval()
