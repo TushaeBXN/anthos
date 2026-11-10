@@ -33,6 +33,7 @@ class PackedTextDataset(IterableDataset):
         seq_len:       int,
         text_field:    str = "text",
         subset:        str | None = None,
+        shuffle_seed:  int | None = None,
     ):
         super().__init__()
         self.dataset_name = dataset_name
@@ -40,6 +41,7 @@ class PackedTextDataset(IterableDataset):
         self.seq_len      = seq_len
         self.text_field   = text_field
         self.subset       = subset
+        self.shuffle_seed = shuffle_seed
 
         # cl100k_base — 100352 vocab, matches SFT tokenizer and model embedding table
         import tiktoken
@@ -54,6 +56,9 @@ class PackedTextDataset(IterableDataset):
             ds = load_dataset(self.dataset_name, self.subset, **load_kwargs)
         else:
             ds = load_dataset(self.dataset_name, **load_kwargs)
+        # Without this a resumed run replays the stream from its first document.
+        if self.shuffle_seed is not None:
+            ds = ds.shuffle(seed=self.shuffle_seed, buffer_size=10_000)
 
         buffer: list[int] = []
         target = self.seq_len + 1   # +1 so we can split into input/labels
@@ -630,6 +635,7 @@ def get_dataloader(
     batch_size:   int,
     num_workers:  int = 0,
     subset:       str | None = None,
+    shuffle_seed: int | None = None,
 ) -> DataLoader:
     """
     Returns a DataLoader that yields (B, seq_len+1) tensors.
@@ -647,6 +653,7 @@ def get_dataloader(
             split        = split,
             seq_len      = seq_len,
             subset       = subset,
+            shuffle_seed = shuffle_seed,
         )
     return DataLoader(
         ds,

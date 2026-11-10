@@ -117,7 +117,8 @@ def main():
     from anthos.data import get_bin_dataloader, get_dataloader
     if a.streaming:
         loader = iter(get_dataloader(a.hf_dataset, split="train", seq_len=a.seq_len,
-                                     batch_size=a.batch_size, num_workers=0, subset=a.hf_subset))
+                                     batch_size=a.batch_size, num_workers=0, subset=a.hf_subset,
+                                     shuffle_seed=a.seed + step))
         val_loader = get_dataloader(a.hf_dataset, split="validation", seq_len=a.seq_len,
                                     batch_size=a.batch_size, num_workers=0, subset=a.hf_subset)
     else:
@@ -149,11 +150,17 @@ def main():
             print(json.dumps(rec), flush=True); log.write(json.dumps(rec) + "\n"); log.flush()
         if step % a.save_every == 0 or step == a.steps:
             ck_path = run_dir / f"step_{step:06d}.pt"
-            torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step, "cfg": dataclasses.asdict(cfg)},
-                       ck_path)
-            # Keep only the latest checkpoint to avoid filling disk
-            for old in sorted(run_dir.glob("step_*.pt"))[:-1]:
-                old.unlink()
+            # Write to a temp name first so a failed save (disk full) never leaves a truncated step_*.pt behind.
+            tmp_path = ck_path.with_suffix(".tmp")
+            try:
+                torch.save({"model": model.state_dict(), "opt": opt.state_dict(), "step": step,
+                            "cfg": dataclasses.asdict(cfg)}, tmp_path)
+                tmp_path.replace(ck_path)
+                for old in sorted(run_dir.glob("step_*.pt"))[:-1]:
+                    old.unlink()
+            except (OSError, RuntimeError) as e:
+                tmp_path.unlink(missing_ok=True)
+                print(f"SAVE FAILED at step {step}: {e} (training continues, previous checkpoint kept)", flush=True)
         if step % a.eval_every == 0 or step == a.steps:
             if a.streaming and val_loader is not None:
                 model.eval()
