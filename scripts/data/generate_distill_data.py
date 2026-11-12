@@ -238,10 +238,10 @@ def build_prompt_list(n: int, mode: str = "general") -> list[str]:
 
 
 def call_ollama(prompt: str, model: str, host: str, timeout: int = 120) -> str | None:
-    url = f"{host}/api/generate"
+    url = f"{host}/api/chat"
     payload = {
         "model": model,
-        "prompt": prompt,
+        "messages": [{"role": "user", "content": prompt}],
         "stream": False,
         "options": {
             "temperature": 0.7,
@@ -253,7 +253,7 @@ def call_ollama(prompt: str, model: str, host: str, timeout: int = 120) -> str |
         resp = requests.post(url, json=payload, timeout=timeout)
         resp.raise_for_status()
         data = resp.json()
-        return data.get("response", "").strip()
+        return data.get("message", {}).get("content", "").strip()
     except Exception as e:
         print(f"  [warn] Ollama call failed: {e}", file=sys.stderr)
         return None
