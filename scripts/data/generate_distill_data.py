@@ -2,14 +2,33 @@
 """
 generate_distill_data.py — Generate distillation data from a local Ollama model.
 
-Usage (on RunPod after `ollama serve` and `ollama pull qwen2.5:7b`):
+Recommended teacher models (pull with `ollama pull <name>`):
 
-    python generate_distill_data.py \
-        --model qwen2.5:7b \
-        --out /workspace/anthos/data/distill_qwen7b.jsonl \
-        --n 25000 \
-        --batch-size 1 \
-        --save-every 500
+  General reasoning + coding:
+    qwen2.5:32b          (~20GB Q4, needs A6000 48GB)
+    qwen2.5:14b          (~9GB Q4, fits on 3090)
+
+  Agentic + cyber + tool-use (best for Anthos):
+    XiaomiMiMo/MiMo-V2.6-Distill-Qwen-9B  (~6GB Q4, fits on 3090)
+    — trained on 11B cyber tokens + 23B code tokens, MIT license
+    — 5x better on cyber benchmarks vs base Qwen 9B
+    — use this for security/tool-use focused distillation
+
+Usage examples:
+
+  # Agentic + cyber focus (best for Anthos, fits on 3090)
+  python generate_distill_data.py \
+      --model hf.co/bartowski/XiaomiMiMo-MiMo-V2.6-Distill-Qwen-9B-GGUF:Q4_K_M \
+      --mode cyber \
+      --out /workspace/anthos/data/distill_mimo_cyber.jsonl \
+      --n 20000 --save-every 200 --resume
+
+  # General reasoning + coding
+  python generate_distill_data.py \
+      --model qwen2.5:14b \
+      --mode general \
+      --out /workspace/anthos/data/distill_qwen14b.jsonl \
+      --n 20000 --save-every 200 --resume
 
 The script saves a checkpoint every --save-every examples so if the pod
 dies you can resume with --resume and pick up where you left off.
@@ -26,8 +45,46 @@ from pathlib import Path
 import requests
 
 # ---------------------------------------------------------------------------
-# Prompt bank — covers reasoning, security, coding, general knowledge, math
+# Prompt banks — general and cyber/agentic (MiMo-focused)
 # ---------------------------------------------------------------------------
+
+# Cyber + agentic prompts — designed for MiMo-V2.6-Distill-Qwen-9B
+PROMPT_BANK_CYBER = [
+    # Vulnerability analysis
+    "You have access to a Linux shell. Enumerate open ports on 192.168.1.10 and identify running services.",
+    "Analyze this Python web app for SQL injection vulnerabilities and show the fix:\n```python\ndef get_user(username):\n    query = f\"SELECT * FROM users WHERE name = '{username}'\"\n    return db.execute(query)\n```",
+    "Walk through how you would perform a full web application pentest. List each phase and the tools you'd use.",
+    "You find a JWT token: eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJ1c2VyIjoiYWRtaW4ifQ. What vulnerability does this represent and how do you exploit it?",
+    "Write a Python tool that checks a list of URLs for open redirect vulnerabilities.",
+    "Explain how to bypass a WAF that blocks common SQL injection payloads. What encoding and obfuscation techniques work?",
+    "Given a binary with NX and ASLR enabled, describe your approach to exploiting a buffer overflow.",
+    "Write a Python script that brute-forces HTTP Basic Auth using a wordlist file.",
+    "You have shell access to a Linux box as www-data. How do you escalate to root? List your enumeration steps.",
+    "Explain how SSRF can be used to access AWS EC2 instance metadata and what credentials you can steal.",
+    "Write a tool to detect subdomain takeover vulnerabilities by checking DNS CNAME records against known vulnerable services.",
+    "How does a time-based blind SQL injection work? Write a payload and detection script.",
+    "Explain how to perform a XXE attack against a SOAP endpoint. Give an example payload.",
+    "You captured a password hash: $2b$12$LQv3c1yqBWVHxkd0LHAkCOYz6TtxMQJqhN8/LewdBPj/LLnYxPX1W. What algorithm is this and how do you crack it?",
+    "Write a Python script that tests for CORS misconfiguration on a list of domains.",
+    # Agent + tool use
+    "You are an agent with bash access. The task: find all world-writable files in /etc and report them. Write your tool calls.",
+    "Using only curl and bash, write a script that checks if a web server is vulnerable to Shellshock.",
+    "You have access to: search(query), fetch(url), execute_code(code). The task: find the latest CVEs for Apache 2.4.50 and summarize their severity.",
+    "Write a function-calling agent loop in Python that takes a task, decides which tool to use, calls it, and iterates until the task is complete.",
+    "You are given tool: `run_command(cmd) -> stdout`. Write an agent that enumerates a Linux system: OS version, running processes, listening ports, sudo rights.",
+    "Design a JSON tool schema for a penetration testing agent. Include tools for: port scanning, web requests, file operations, and code execution.",
+    "An agent receives: 'check if example.com is vulnerable to clickjacking'. Write the full tool-call sequence to test this.",
+    "Write a Python class that implements a ReAct (Reason + Act) loop for a security research agent.",
+    # Defensive + analysis
+    "You receive this log entry: '192.168.1.5 - - [10/Nov/2026:03:22:15] \"GET /admin/../../../etc/passwd HTTP/1.1\" 200'. What happened and how do you respond?",
+    "Write a Python script that parses Apache access logs and identifies potential LFI/RFI attempts.",
+    "Explain how to harden a Linux server against SSH brute force attacks. Give the exact config changes.",
+    "Design a security monitoring pipeline that ingests syslog, detects anomalies, and alerts on suspicious patterns.",
+    "You see this in /var/log/auth.log: repeated failed sudo attempts followed by a successful one at 3am. What do you investigate?",
+    "Write a Python honeypot that logs connection attempts, records payloads, and alerts via webhook.",
+    "Explain how to use eBPF for runtime security monitoring. What can you detect that traditional tools miss?",
+    "Write a YARA rule to detect a hypothetical malware that creates files with random 8-char names in %TEMP%.",
+]
 
 PROMPT_BANK = [
     # Reasoning
@@ -161,15 +218,20 @@ TOPICS = [
 ]
 
 
-def build_prompt_list(n: int) -> list[str]:
-    prompts = list(PROMPT_BANK)
+def build_prompt_list(n: int, mode: str = "general") -> list[str]:
+    if mode == "cyber":
+        base = list(PROMPT_BANK_CYBER)
+    elif mode == "mixed":
+        base = list(PROMPT_BANK) + list(PROMPT_BANK_CYBER)
+    else:
+        base = list(PROMPT_BANK)
     # Fill up to n with generated variations
-    while len(prompts) < n:
+    while len(base) < n:
         style = random.choice(QUESTION_STYLES)
         topic = random.choice(TOPICS)
-        prompts.append(style.format(topic=topic))
-    random.shuffle(prompts)
-    return prompts[:n]
+        base.append(style.format(topic=topic))
+    random.shuffle(base)
+    return base[:n]
 
 
 def call_ollama(prompt: str, model: str, host: str, timeout: int = 120) -> str | None:
@@ -213,6 +275,8 @@ def main():
     parser.add_argument("--model", default="qwen2.5:7b", help="Ollama model name")
     parser.add_argument("--out", default="data/distill_qwen7b.jsonl", help="Output JSONL path")
     parser.add_argument("--n", type=int, default=25000, help="Number of examples to generate")
+    parser.add_argument("--mode", choices=["general", "cyber", "mixed"], default="general",
+                        help="Prompt focus: general (default), cyber/agentic (best with MiMo), or mixed")
     parser.add_argument("--host", default="http://localhost:11434", help="Ollama host")
     parser.add_argument("--save-every", type=int, default=500, help="Print progress every N examples")
     parser.add_argument("--resume", action="store_true", help="Skip prompts already in output file")
@@ -228,10 +292,11 @@ def main():
         seen_prompts = load_checkpoint(out_path)
         print(f"Resuming — {len(seen_prompts)} examples already written, skipping those prompts.")
 
-    prompts = build_prompt_list(args.n)
+    prompts = build_prompt_list(args.n, mode=args.mode)
     prompts = [p for p in prompts if p not in seen_prompts]
 
     print(f"Model:  {args.model}")
+    print(f"Mode:   {args.mode}")
     print(f"Output: {out_path}")
     print(f"Target: {args.n} examples ({len(prompts)} remaining)")
     print(f"Host:   {args.host}")
