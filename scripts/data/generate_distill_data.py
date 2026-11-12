@@ -225,11 +225,14 @@ def build_prompt_list(n: int, mode: str = "general") -> list[str]:
         base = list(PROMPT_BANK) + list(PROMPT_BANK_CYBER)
     else:
         base = list(PROMPT_BANK)
-    # Fill up to n with generated variations
+    # Fill up to n with indexed variations so every prompt is unique
+    idx = 0
     while len(base) < n:
         style = random.choice(QUESTION_STYLES)
         topic = random.choice(TOPICS)
-        base.append(style.format(topic=topic))
+        # Append idx to guarantee uniqueness across resume runs
+        base.append(style.format(topic=topic) + f" [#{idx}]")
+        idx += 1
     random.shuffle(base)
     return base[:n]
 
