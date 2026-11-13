@@ -142,7 +142,7 @@ if [ "$DATA_ONLY" -eq 0 ]; then
     echo "  Logs: $LOG_DIR/setup_base.log"
 
     python scripts/train/setup_anthos_base.py \
-        --base-model Qwen/Qwen2.5-9B-Instruct \
+        --base-model Qwen/Qwen3.5-35B-A3B-Base \
         --out-dir checkpoints/anthos-base \
         --tokenizer-dir anthos-tokenizer \
         2>&1 | tee "$LOG_DIR/setup_base.log"

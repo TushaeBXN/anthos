@@ -183,7 +183,7 @@ def smoke_test(model, tokenizer) -> bool:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--base-model", default="Qwen/Qwen2.5-9B-Instruct")
+    ap.add_argument("--base-model", default="Qwen/Qwen3.5-35B-A3B-Base")
     ap.add_argument("--out-dir", default="checkpoints/anthos-base")
     ap.add_argument("--tokenizer-dir", default="anthos-tokenizer")
     ap.add_argument("--vision", action="store_true", help="Transplant vision encoder from Qwen2.5-VL")
