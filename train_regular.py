@@ -16,6 +16,7 @@ import argparse
 import dataclasses
 import json
 import math
+import os
 import time
 from pathlib import Path
 
@@ -158,6 +159,21 @@ def main():
                 tmp_path.replace(ck_path)
                 for old in sorted(run_dir.glob("step_*.pt"))[:-1]:
                     old.unlink()
+                # Upload to HuggingFace if HF_TOKEN is set
+                hf_token = os.environ.get("HF_TOKEN")
+                hf_repo = os.environ.get("HF_CHECKPOINT_REPO")
+                if hf_token and hf_repo:
+                    try:
+                        from huggingface_hub import HfApi
+                        HfApi(token=hf_token).upload_file(
+                            path_or_fileobj=str(ck_path),
+                            path_in_repo=ck_path.name,
+                            repo_id=hf_repo,
+                            repo_type="model",
+                        )
+                        print(f"HF upload: {ck_path.name} → {hf_repo}", flush=True)
+                    except Exception as e:
+                        print(f"HF upload failed (non-fatal): {e}", flush=True)
             except (OSError, RuntimeError) as e:
                 tmp_path.unlink(missing_ok=True)
                 print(f"SAVE FAILED at step {step}: {e} (training continues, previous checkpoint kept)", flush=True)
