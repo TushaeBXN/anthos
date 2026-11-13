@@ -241,7 +241,7 @@ def call_ollama(prompt: str, model: str, host: str, timeout: int = 120) -> str |
     url = f"{host}/api/chat"
     payload = {
         "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+        "messages": [{"role": "user", "content": prompt + " /no_think"}],
         "stream": False,
         "options": {
             "temperature": 0.7,
