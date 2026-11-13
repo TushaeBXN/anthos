@@ -247,7 +247,7 @@ class AnthosCore(nn.Module):
 
 def build_anthos(
     tokenizer_path: str,
-    base_model_id: str = "Qwen/Qwen2.5-7B-Instruct",
+    base_model_id: str = "Qwen/Qwen2.5-9B-Instruct",
     checkpoint: str | None = None,
     device: str = "auto",
     num_recurrent_loops: int = 3,
