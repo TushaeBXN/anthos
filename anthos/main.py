@@ -1793,12 +1793,24 @@ class Anthos(nn.Module):
         temperature:    float = 1.0,
         top_k:          int   = 50,
     ) -> torch.Tensor:
-        """Autoregressive generation with KV caching and correct RoPE positions."""
-        kv_cache  = {}
+        """Autoregressive generation with KV caching and correct RoPE positions.
+
+        KV caching is only valid when ``cfg.thought_prefix_only`` is True. Otherwise the
+        thought tokens are built from ``e.mean(dim=1)`` over the whole input, which a
+        one-token-per-step cached decode cannot reproduce (it would average over a single
+        token), so the output diverges from the training forward pass after the first new
+        token. In that case every step re-runs the full forward pass on the whole prefix
+        (slower, but matches training and teacher-forced scoring).
+        """
+        use_cache = bool(self.cfg.thought_prefix_only)
+        kv_cache  = {} if use_cache else None
         generated = input_ids
 
         for step in range(max_new_tokens):
-            if step == 0:
+            if not use_cache:
+                ctx       = generated
+                start_pos = 0
+            elif step == 0:
                 ctx       = generated
                 start_pos = 0
             else:
