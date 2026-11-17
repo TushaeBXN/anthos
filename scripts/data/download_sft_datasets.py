@@ -355,6 +355,246 @@ def load_jev(limit: int, hf_token: str | None) -> list[dict]:
     return records
 
 
+def load_glm_agent(hf_token: str | None) -> list[dict]:
+    """
+    AletheiaResearch/GLM-5.2-Agent — agentic reasoning traces from GLM-5.2.
+    Multi-step tool-use and planning chains.
+    """
+    print("\n[8/9] AletheiaResearch/GLM-5.2-Agent...")
+    try:
+        kwargs = dict(split="train")
+        if hf_token:
+            kwargs["token"] = hf_token
+        dataset = load_dataset("AletheiaResearch/GLM-5.2-Agent", **kwargs)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return []
+
+    records = []
+    for row in tqdm(dataset, desc="  GLM-5.2-Agent"):
+        instruction = (row.get("instruction") or row.get("prompt") or
+                       row.get("question") or row.get("input") or "")
+        response = (row.get("response") or row.get("output") or
+                    row.get("answer") or "")
+
+        if not instruction and "messages" in row:
+            msgs = row["messages"]
+            if isinstance(msgs, list) and len(msgs) >= 2:
+                for m in msgs:
+                    if isinstance(m, dict) and m.get("role") == "user" and not instruction:
+                        instruction = m.get("content", "")
+                    elif isinstance(m, dict) and m.get("role") == "assistant":
+                        response = m.get("content", "")
+
+        if instruction and response and len(response) > 20:
+            records.append(msg(instruction, response))
+
+    print(f"  Collected {len(records):,} rows from GLM-5.2-Agent.")
+    return records
+
+
+def load_manusagents_frontier(limit: int, hf_token: str | None) -> list[dict]:
+    """
+    Manusagents/GPT-5.5-Gemini-3.1-Pro-Grok-4-Claude-Fable-5-... — multi-frontier distillation.
+    Large dataset; cap with limit.
+    """
+    print(f"\n[9/9] Manusagents/GPT-5.5-Gemini-Grok-Claude distillation (limit={limit:,})...")
+    try:
+        kwargs = dict(split="train", streaming=True, trust_remote_code=True)
+        if hf_token:
+            kwargs["token"] = hf_token
+        dataset = load_dataset(
+            "Manusagents/GPT-5.5-Gemini-3.1-Pro-Grok-4-Claude-Fable-5-Mythos-5-Qwen-3.7-Max-and-more-Distillation-Dataset",
+            **kwargs)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return []
+
+    records = []
+    for i, row in enumerate(tqdm(dataset, total=limit, desc="  Manus-Frontier")):
+        if i >= limit:
+            break
+        instruction = (row.get("instruction") or row.get("prompt") or
+                       row.get("question") or row.get("input") or "")
+        response = (row.get("response") or row.get("output") or
+                    row.get("answer") or row.get("completion") or "")
+
+        if not instruction and "messages" in row:
+            msgs = row["messages"]
+            if isinstance(msgs, list) and len(msgs) >= 2:
+                instruction = msgs[0].get("content", "")
+                response = msgs[-1].get("content", "")
+
+        if instruction and response and len(response) > 20:
+            records.append(msg(instruction, response))
+
+    print(f"  Collected {len(records):,} rows from Manus-Frontier.")
+    return records
+
+
+def load_glaive_function_calling(limit: int, hf_token: str | None) -> list[dict]:
+    """
+    glaiveai/glaive-function-calling-v2 — 110K function-call traces, Apache 2.0.
+    System prompt defines tools as JSON schema; assistant emits tool_call JSON.
+    """
+    print(f"\n[10/12] glaiveai/glaive-function-calling-v2 (limit={limit:,})...")
+    try:
+        kwargs = dict(split="train", trust_remote_code=True)
+        if hf_token:
+            kwargs["token"] = hf_token
+        dataset = load_dataset("glaiveai/glaive-function-calling-v2", **kwargs)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return []
+
+    records = []
+    for i, row in enumerate(tqdm(dataset, desc="  Glaive FC")):
+        if i >= limit:
+            break
+        # Format: system (tool defs) + chat string with FUNCTION_CALL / FUNCTION_RESPONSE tags
+        system = row.get("system", "")
+        chat = row.get("chat", "")
+        if not chat:
+            continue
+        # Extract first user turn and first assistant turn
+        lines = chat.strip().split("\n")
+        user, assistant = "", ""
+        for line in lines:
+            if line.startswith("USER:") and not user:
+                user = line[5:].strip()
+            elif line.startswith("ASSISTANT:") and not assistant:
+                assistant = line[10:].strip()
+        if user and assistant and len(assistant) > 10:
+            msgs = []
+            if system:
+                msgs.append({"role": "system", "content": system})
+            msgs.append({"role": "user", "content": user})
+            msgs.append({"role": "assistant", "content": assistant})
+            records.append({"messages": msgs})
+
+    print(f"  Collected {len(records):,} rows from Glaive FC.")
+    return records
+
+
+def load_hermes_function_calling(limit: int, hf_token: str | None) -> list[dict]:
+    """
+    NousResearch/hermes-function-calling-v1 — structured tool use, Apache 2.0.
+    """
+    print(f"\n[11/12] NousResearch/hermes-function-calling-v1 (limit={limit:,})...")
+    try:
+        kwargs = dict(split="train", trust_remote_code=True)
+        if hf_token:
+            kwargs["token"] = hf_token
+        dataset = load_dataset("NousResearch/hermes-function-calling-v1", **kwargs)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return []
+
+    records = []
+    for i, row in enumerate(tqdm(dataset, desc="  Hermes FC")):
+        if i >= limit:
+            break
+        if "conversations" in row:
+            convs = row["conversations"]
+            if isinstance(convs, list) and len(convs) >= 2:
+                records.append({"messages": [
+                    {"role": c.get("role") or ("user" if c.get("from") == "human" else "assistant"),
+                     "content": c.get("content") or c.get("value", "")}
+                    for c in convs if c.get("content") or c.get("value")
+                ]})
+        else:
+            instruction = (row.get("instruction") or row.get("prompt") or "").strip()
+            response = (row.get("response") or row.get("output") or "").strip()
+            if instruction and response and len(response) > 10:
+                records.append(msg(instruction, response))
+
+    print(f"  Collected {len(records):,} rows from Hermes FC.")
+    return records
+
+
+def load_toolbench(limit: int, hf_token: str | None) -> list[dict]:
+    """
+    ToolBench/ToolBench — real API tool-call traces, MIT.
+    """
+    print(f"\n[12/12] ToolBench/ToolBench (limit={limit:,})...")
+    try:
+        kwargs = dict(split="train", streaming=True, trust_remote_code=True)
+        if hf_token:
+            kwargs["token"] = hf_token
+        dataset = load_dataset("ToolBench/ToolBench", **kwargs)
+    except Exception as e:
+        print(f"  Failed: {e}")
+        return []
+
+    records = []
+    for i, row in enumerate(tqdm(dataset, total=limit, desc="  ToolBench")):
+        if i >= limit:
+            break
+        conversations = row.get("conversations", [])
+        if isinstance(conversations, list) and len(conversations) >= 2:
+            user = next((c.get("value","") for c in conversations if c.get("from")=="human"), "")
+            assistant = next((c.get("value","") for c in conversations if c.get("from")=="gpt"), "")
+            if user and assistant and len(assistant) > 20:
+                records.append(msg(user, assistant))
+
+    print(f"  Collected {len(records):,} rows from ToolBench.")
+    return records
+
+
+def load_coding_datasets(limit_each: int, hf_token: str | None) -> list[dict]:
+    """
+    Three best coding datasets:
+    - bigcode/self-oss-instruct-sc2-exec-filter-50k (verified executable code)
+    - ise-uiuc/Magicoder-OSS-Instruct-75K (real open-source code pairs)
+    - m-a-p/CodeFeedback-Filtered-Instruction (code + correction traces)
+    """
+    datasets_to_load = [
+        ("bigcode/self-oss-instruct-sc2-exec-filter-50k", "BigCode OSS Instruct"),
+        ("ise-uiuc/Magicoder-OSS-Instruct-75K", "Magicoder OSS"),
+        ("m-a-p/CodeFeedback-Filtered-Instruction", "CodeFeedback"),
+    ]
+
+    all_records = []
+    for ds_id, label in datasets_to_load:
+        print(f"\n  Loading {label} ({ds_id})...")
+        try:
+            kwargs = dict(split="train", trust_remote_code=True)
+            if hf_token:
+                kwargs["token"] = hf_token
+            dataset = load_dataset(ds_id, **kwargs)
+        except Exception as e:
+            try:
+                kwargs["streaming"] = True
+                dataset = load_dataset(ds_id, **kwargs)
+            except Exception as e2:
+                print(f"    Failed: {e2}")
+                continue
+
+        records = []
+        for i, row in enumerate(tqdm(dataset, total=limit_each, desc=f"    {label}")):
+            if i >= limit_each:
+                break
+            instruction = (row.get("instruction") or row.get("prompt") or
+                           row.get("problem") or row.get("question") or "").strip()
+            response = (row.get("response") or row.get("solution") or
+                        row.get("answer") or row.get("output") or "").strip()
+            if not instruction and "messages" in row:
+                msgs = row["messages"]
+                if isinstance(msgs, list) and len(msgs) >= 2:
+                    for m in msgs:
+                        if m.get("role") == "user" and not instruction:
+                            instruction = m.get("content", "")
+                        elif m.get("role") == "assistant":
+                            response = m.get("content", "")
+            if instruction and response and len(response) > 20:
+                records.append(msg(instruction, response))
+
+        print(f"    Collected {len(records):,} rows from {label}.")
+        all_records.extend(records)
+
+    return all_records
+
+
 def load_local_distill(data_dir: Path) -> list[dict]:
     """Load local distillation JSONL files from data/distill_*.jsonl."""
     print("\n[7/7] Local distillation data...")
@@ -394,8 +634,18 @@ def main():
                     help="Max rows from Manusagents (default 500k — full dataset is 16M+)")
     ap.add_argument("--jev-limit", type=int, default=100_000,
                     help="Max rows from jev-distill-corpus (default 100k — full is 741k)")
+    ap.add_argument("--frontier-limit", type=int, default=100_000,
+                    help="Max rows from Manusagents frontier distillation (default 100k)")
+    ap.add_argument("--glaive-limit", type=int, default=50_000,
+                    help="Max rows from Glaive function calling (default 50k)")
+    ap.add_argument("--hermes-limit", type=int, default=50_000,
+                    help="Max rows from Hermes function calling (default 50k)")
+    ap.add_argument("--toolbench-limit", type=int, default=20_000,
+                    help="Max rows from ToolBench (default 20k)")
+    ap.add_argument("--coding-limit", type=int, default=50_000,
+                    help="Max rows per coding dataset (default 50k each)")
     ap.add_argument("--only", nargs="+", metavar="NAME",
-                    choices=["manus", "faunix", "fable", "mimo", "teichai", "jev", "local"],
+                    choices=["manus", "faunix", "fable", "mimo", "teichai", "jev", "glm", "frontier", "glaive", "hermes", "toolbench", "coding", "local"],
                     help="Only load these datasets (default: all)")
     ap.add_argument("--skip-existing", action="store_true",
                     help="If output file exists, skip (do not overwrite)")
@@ -442,6 +692,25 @@ def main():
 
     if not only or "jev" in only:
         all_records.extend(load_jev(a.jev_limit, hf_token))
+
+    if not only or "glm" in only:
+        all_records.extend(load_glm_agent(hf_token))
+
+    if not only or "frontier" in only:
+        all_records.extend(load_manusagents_frontier(a.frontier_limit, hf_token))
+
+    if not only or "glaive" in only:
+        all_records.extend(load_glaive_function_calling(a.glaive_limit, hf_token))
+
+    if not only or "hermes" in only:
+        all_records.extend(load_hermes_function_calling(a.hermes_limit, hf_token))
+
+    if not only or "toolbench" in only:
+        all_records.extend(load_toolbench(a.toolbench_limit, hf_token))
+
+    if not only or "coding" in only:
+        print("\n[coding] Loading coding datasets...")
+        all_records.extend(load_coding_datasets(a.coding_limit, hf_token))
 
     if not only or "local" in only:
         all_records.extend(load_local_distill(Path(a.data_dir)))
