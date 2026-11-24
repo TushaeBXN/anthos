@@ -185,6 +185,9 @@ def main():
     print(f"  Batch:      {a.batch} × {a.grad_accum} = {a.batch * a.grad_accum} effective")
     print(f"  Output:     {out_path}")
 
+    # Mask user/tool tokens so only assistant turns contribute to loss.
+    # Without this the model wastes capacity modeling tool outputs instead of decisions.
+    from unsloth.chat_templates import train_on_responses_only
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -210,6 +213,11 @@ def main():
             seed=42,
             report_to="none",
         ),
+    )
+    trainer = train_on_responses_only(
+        trainer,
+        instruction_part="<|im_start|>user\n",
+        response_part="<|im_start|>assistant\n",
     )
 
     trainer.train()
