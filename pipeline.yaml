@@ -1,0 +1,32 @@
+paths:
+  base_model: "Qwen/Qwen2.5-9B-Instruct"
+  coder_model: "Qwen/Qwen2.5-Coder-7B-Instruct"
+  merged: "outputs/anthos-merged"
+  sft: "outputs/anthos-sft"
+  abliterated: "outputs/anthos-abliterated"
+  dpo: "outputs/anthos-dpo"
+  gguf: "export/anthos-Q4_K_M.gguf"
+  sft_data: "data/anthos_sft_reasoning.jsonl"
+  dpo_data: "data/anthos_dpo.jsonl"
+
+merge:
+  base_weight: 0.65
+  coder_weight: 0.35
+  density: 0.55
+
+sft_data:
+  coding: 800
+
+abliterate:
+  scale: 0.65    # conservative — DPO repairs any residual damage
+  top_layers: 10
+
+# beta=0.5 is the stable default for instruction-tuned models.
+# beta=0.1 is aggressive and risks trading capability for preference signal.
+dpo:
+  beta: 0.5
+  epochs: 1
+  lr: 5.0e-6
+
+gguf:
+  quant: "Q4_K_M"

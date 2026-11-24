@@ -54,11 +54,12 @@ except ImportError:
 # Config
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL = "unsloth/Qwen2.5-7B-Instruct"
+# Default is now the merged model output; override with --model for a different base
+DEFAULT_MODEL = "outputs/anthos-merged"
 LORA_R = 16
 LORA_ALPHA = 32
 LORA_DROPOUT = 0.05
-MAX_SEQ_LEN = 4096
+MAX_SEQ_LEN = 8192   # Qwen2.5 supports up to 128k; 8k is enough for reasoning traces
 
 
 def load_jsonl_files(paths: list[str]) -> list[dict]:
@@ -87,6 +88,14 @@ def load_jsonl_files(paths: list[str]) -> list[dict]:
                     pass
         print(f"  {p.name}: {count:,} records")
     return records
+
+
+def has_think_block(record: dict) -> bool:
+    """Return True if any assistant message contains a <think> block."""
+    for msg in record.get("messages", []):
+        if msg.get("role") == "assistant" and "<think>" in msg.get("content", ""):
+            return True
+    return False
 
 
 def to_text(record: dict, tokenizer) -> str:
@@ -122,6 +131,16 @@ def main():
 
     out_path = Path(a.out)
     out_path.mkdir(parents=True, exist_ok=True)
+
+    # ── 0. Load + validate data ──────────────────────────────────────────────
+    print(f"\nLoading data from: {a.data}")
+    records = load_jsonl_files(a.data)
+    n_with_think = sum(1 for r in records if has_think_block(r))
+    n_without = len(records) - n_with_think
+    print(f"  Total: {len(records):,}  |  with <think>: {n_with_think:,}  |  without: {n_without:,}")
+    if n_without > len(records) * 0.3:
+        print(f"  WARNING: {n_without:,} examples ({n_without/len(records):.0%}) have no <think> block.")
+        print("  Run generate_reasoning_traces.py to add more reasoning trace data.")
 
     # ── 1. Load model ────────────────────────────────────────────────────────
     print(f"\nLoading base model: {a.model}")
