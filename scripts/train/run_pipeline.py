@@ -159,9 +159,35 @@ def stage_dpo(cfg: dict, skip_existing: bool) -> None:
     )
 
 
+def stage_rsi(cfg: dict, skip_existing: bool) -> None:
+    rsi_cfg = cfg.get("rsi", {})
+    start_from = Path(cfg["paths"]["dpo"]) / "merged"
+    final_model = rsi_cfg.get("final_model")
+
+    if skip_existing and final_model and Path(final_model).exists():
+        LOG.info("[rsi] final_model already set, skipping")
+        return
+
+    run(
+        [
+            sys.executable, str(SCRIPTS / "rsi_loop.py"),
+            "--config", "pipeline.yaml",
+            "--start-from", str(start_from),
+            "--rounds", str(rsi_cfg.get("rounds", 8)),
+            "--top-gaps", str(rsi_cfg.get("top_gaps", 10)),
+            "--gap-margin", str(rsi_cfg.get("gap_margin", 0.02)),
+            "--canary-tolerance", str(rsi_cfg.get("canary_tolerance", 0.01)),
+        ],
+        Path("logs/rsi.log"),
+    )
+
+
 def stage_gguf(cfg: dict, skip_existing: bool) -> None:
     p = cfg["paths"]
-    model_in = Path(p["dpo"]) / "merged"
+    # Use RSI final model if available, otherwise fall back to DPO output
+    rsi_final = cfg.get("rsi", {}).get("final_model")
+    model_in = Path(rsi_final) if rsi_final and Path(rsi_final).exists() else Path(p["dpo"]) / "merged"
+    LOG.info("[gguf] exporting from: %s", model_in)
     gguf_out = Path(p["gguf"])
     quant = cfg["gguf"]["quant"]
 
@@ -210,6 +236,7 @@ STAGE_FNS = {
     "sft": stage_sft,
     "abliterate": stage_abliterate,
     "dpo": stage_dpo,
+    "rsi": stage_rsi,
     "gguf": stage_gguf,
 }
 
@@ -217,7 +244,7 @@ STAGE_FNS = {
 def main() -> int:
     parser = argparse.ArgumentParser(description="Anthos pipeline runner")
     parser.add_argument("--config", type=Path, required=True)
-    parser.add_argument("--stages", default="merge,sft,abliterate,dpo,gguf",
+    parser.add_argument("--stages", default="merge,sft,abliterate,dpo,rsi,gguf",
                         help="Comma-separated stages to run")
     parser.add_argument("--skip-existing", action="store_true",
                         help="Skip a stage if its output already exists")

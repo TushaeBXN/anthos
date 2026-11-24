@@ -30,3 +30,15 @@ dpo:
 
 gguf:
   quant: "Q4_K_M"
+
+# Recursive self-improvement loop (post-DPO, pre-GGUF).
+# detect → target → DPO → gate  (×rounds)
+# Gate: candidate must improve gap suite by ≥ gap_margin
+#       and not regress canary by > canary_tolerance.
+# Calibration canary guards against abliteration + RSI → over-confidence.
+rsi:
+  rounds: 8
+  top_gaps: 10          # top-N gap nodes attacked per iteration
+  gap_margin: 0.02      # minimum gap improvement to commit
+  canary_tolerance: 0.01
+  final_model: null     # written by rsi_loop.py after completion
